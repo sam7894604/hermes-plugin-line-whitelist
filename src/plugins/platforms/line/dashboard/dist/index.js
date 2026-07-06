@@ -98,31 +98,11 @@
         ),
         error ? h("div", { className: "hermes-line-msg-err" }, error) : null,
 
-        // --- per-scope chip lists -----------------------------------------
-        SCOPES.map(function (s) {
-          const entries = (data && data[s.bucket]) || [];
-          return h("div", { key: s.scope, className: "hermes-line-scope-block" },
-            h("div", { className: "hermes-line-scope-title" },
-              s.label,
-              h(Badge, { className: "hermes-line-count" }, String(entries.length)),
-            ),
-            entries.length === 0
-              ? h("div", { className: "hermes-line-empty" }, "none")
-              : h("div", { className: "hermes-line-chips" },
-                  entries.map(function (entry) {
-                    return h(WhitelistChip, {
-                      key: (entry.id || entry) + ":" + s.scope,
-                      entry: entry,
-                      scope: s.scope,
-                      resolvable: s.resolvable,
-                      resolveName: resolveName,
-                      busy: busy,
-                      onRemove: onRemove,
-                    });
-                  })
-                ),
-          );
-        }),
+        // The current entries (store + env, with names / lock badges / delete)
+        // are shown by the Authorized panel above — we don't duplicate them
+        // here, keeping this panel to just the "add a new entry" form.
+        h("div", { className: "hermes-line-hint" },
+          "已授權項目與刪除見上方「已授權清單」。 · Manage existing entries in the Authorized panel above."),
       ),
     );
   }

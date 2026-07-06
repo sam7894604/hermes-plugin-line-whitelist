@@ -346,3 +346,11 @@
   background: var(--destructive, #7f1d1d);
   color: #fff;
 }
+
+/* Muted hint under the Allowlist add form (existing entries live in Authorized). */
+.hermes-line-hint {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--muted-foreground, #8a8f98);
+  opacity: 0.8;
+}

@@ -1,0 +1,563 @@
+diff --git a/plugins/platforms/line/adapter.py b/plugins/platforms/line/adapter.py
+index 447cf5fb0..881d57395 100644
+--- a/plugins/platforms/line/adapter.py
++++ b/plugins/platforms/line/adapter.py
+@@ -96,6 +96,15 @@ from gateway.platforms.base import (
+ )
+ from gateway.config import Platform
+ 
++# Whitelist subsystem (Phase 1 — hot-reload store backed by config.yaml).
++# Relative import in the normal package context; fall back to the absolute
++# path when adapter.py is loaded as a standalone module (the test plugin
++# loader executes it outside its parent package).
++try:
++    from .whitelist_store import WhitelistStore
++except ImportError:  # pragma: no cover - standalone plugin-loader path
++    from plugins.platforms.line.whitelist_store import WhitelistStore
++
+ 
+ # ---------------------------------------------------------------------------
+ # Constants
+@@ -106,6 +115,11 @@ LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push"
+ LINE_LOADING_URL = "https://api.line.me/v2/bot/chat/loading/start"
+ LINE_CONTENT_URL_FMT = "https://api-data.line.me/v2/bot/message/{message_id}/content"
+ LINE_BOT_INFO_URL = "https://api.line.me/v2/bot/info"
++# Name resolution (whitelist subsystem — display names for Dashboard / observed context)
++LINE_PROFILE_URL_FMT = "https://api.line.me/v2/bot/profile/{user_id}"
++LINE_GROUP_SUMMARY_URL_FMT = "https://api.line.me/v2/bot/group/{group_id}/summary"
++LINE_GROUP_MEMBER_URL_FMT = "https://api.line.me/v2/bot/group/{group_id}/member/{user_id}"
++LINE_ROOM_MEMBER_URL_FMT = "https://api.line.me/v2/bot/room/{room_id}/member/{user_id}"
+ 
+ # LINE Messaging API hard limits
+ LINE_PER_BUBBLE_CHARS = 5000  # Hard limit per text message object
+@@ -438,6 +452,44 @@ def _allowed_for_source(
+     return False
+ 
+ 
++# Unauthorized-source English replies (whitelist subsystem §2.6 / §2.7).
++UNAUTH_GROUP_REPLY = (
++    "This group isn't authorized to use the assistant yet. "
++    "An administrator has been notified — please wait for approval."
++)
++UNAUTH_DM_REPLY = (
++    "You're not authorized to use this assistant yet. "
++    "An administrator has been notified — please contact the admin for access."
++)
++
++
++def _message_text(msg: Dict[str, Any]) -> str:
++    """Best-effort plain-text extraction of an inbound message (for logging)."""
++    if (msg or {}).get("type") == "text":
++        return msg.get("text", "") or ""
++    return f"[{(msg or {}).get('type', 'unknown')}]"
++
++
++def _bot_mentioned(msg: Dict[str, Any], bot_user_id: Optional[str]) -> bool:
++    """True if this text message @-mentions the bot.
++
++    LINE puts mentions at ``message.mention.mentionees[]``; each entry carries
++    ``isSelf`` (bool) and ``userId``. A ``type == "all"`` (@everyone) entry is
++    NOT treated as addressing the bot specifically.
++    """
++    mention = (msg or {}).get("mention") or {}
++    for m in mention.get("mentionees", []) or []:
++        if not isinstance(m, dict):
++            continue
++        if m.get("type") == "all":
++            continue
++        if m.get("isSelf"):
++            return True
++        if bot_user_id and m.get("userId") == bot_user_id:
++            return True
++    return False
++
++
+ # ---------------------------------------------------------------------------
+ # LINE Reply / Push HTTP client
+ # ---------------------------------------------------------------------------
+@@ -527,6 +579,52 @@ class _LineClient:
+         except Exception:
+             return None
+ 
++    async def _get_json_field(self, url: str, field: str) -> Optional[str]:
++        """Shared GET helper for name-resolution endpoints. Best-effort."""
++        import aiohttp
++        timeout = aiohttp.ClientTimeout(total=10.0)
++        try:
++            async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
++                async with session.get(url, headers=self._headers) as resp:
++                    if resp.status >= 400:
++                        return None
++                    data = await resp.json()
++                    return data.get(field)
++        except Exception:
++            return None
++
++    async def get_profile(self, user_id: str) -> Optional[str]:
++        """Display name for a 1:1 / followed user (``GET /v2/bot/profile/{id}``)."""
++        if not user_id:
++            return None
++        return await self._get_json_field(
++            LINE_PROFILE_URL_FMT.format(user_id=user_id), "displayName"
++        )
++
++    async def get_group_summary(self, group_id: str) -> Optional[str]:
++        """Group name (``GET /v2/bot/group/{id}/summary``)."""
++        if not group_id:
++            return None
++        return await self._get_json_field(
++            LINE_GROUP_SUMMARY_URL_FMT.format(group_id=group_id), "groupName"
++        )
++
++    async def get_member_name(
++        self, chat_id: str, user_id: str, *, chat_type: str = "group"
++    ) -> Optional[str]:
++        """Display name of a member inside a group/room.
++
++        LINE's plain ``/profile`` endpoint does not work for arbitrary group
++        members — the group/room member endpoint is required.
++        """
++        if not chat_id or not user_id:
++            return None
++        if chat_type == "room":
++            url = LINE_ROOM_MEMBER_URL_FMT.format(room_id=chat_id, user_id=user_id)
++        else:
++            url = LINE_GROUP_MEMBER_URL_FMT.format(group_id=chat_id, user_id=user_id)
++        return await self._get_json_field(url, "displayName")
++
+ 
+ # ---------------------------------------------------------------------------
+ # Message builders
+@@ -689,6 +787,30 @@ class LineAdapter(BasePlatformAdapter):
+             os.getenv("LINE_ALLOWED_ROOMS", "")
+         ) | set(extra.get("allowed_rooms", []))
+ 
++        # Whitelist subsystem (Phase 1): hot-reload store backed by
++        # config.yaml (platforms.line.*). The static env allowlists above are
++        # kept as a backward-compatible overlay — a source is authorized if it
++        # matches EITHER the env sets OR the live config store (so existing
++        # env-only deployments keep working while new entries hot-reload).
++        try:
++            self._whitelist: Optional[WhitelistStore] = WhitelistStore()
++        except Exception as exc:  # pragma: no cover - defensive
++            logger.warning(
++                "LINE: WhitelistStore init failed (%s); env allowlists only", exc
++            )
++            self._whitelist = None
++        # Passive-context (observed) group recording — §6. Default on; the
++        # store/config `observe_unmentioned` flag can disable per deployment.
++        self._observe_unmentioned = _truthy_env(
++            "LINE_OBSERVE_UNMENTIONED",
++            bool(extra.get("observe_unmentioned", True)),
++        )
++        # Name-resolution TTL cache: id -> (display_name, expiry_ts).
++        self._name_cache: Dict[str, Tuple[str, float]] = {}
++        self._name_cache_ttl = float(
++            os.getenv("LINE_NAME_CACHE_TTL") or extra.get("name_cache_ttl", 3600)
++        )
++
+         # Slow-LLM postback button threshold
+         try:
+             self.slow_response_threshold = float(
+@@ -909,27 +1031,35 @@ class LineAdapter(BasePlatformAdapter):
+         if self._bot_user_id and sender_user_id == self._bot_user_id:
+             return
+ 
+-        # Allowlist gate.
+-        if not _allowed_for_source(
+-            source,
+-            allow_all=self.allow_all,
+-            user_ids=self.allowed_users,
+-            group_ids=self.allowed_groups,
+-            room_ids=self.allowed_rooms,
+-        ):
+-            logger.info("LINE: rejecting unauthorized source %s", source)
+-            return
++        authorized = self._source_authorized(source)
+ 
+         if event_type == "message":
+-            await self._handle_message_event(event)
++            # Message events carry the routing nuance (@mention gating,
++            # unauthorized English reply, passive observe-recording), so the
++            # authorization *decision* is made here but the *policy* is applied
++            # inside the handler where replyToken / mention / text are known.
++            await self._handle_message_event(event, authorized=authorized)
+         elif event_type == "postback":
++            # Postbacks only make sense from an already-authorized source
++            # (the button was sent to them after a prior authorized turn).
++            if not authorized:
++                logger.info("LINE: rejecting postback from unauthorized %s", source)
++                return
+             await self._handle_postback_event(event)
+-        elif event_type in {"follow", "unfollow", "join", "leave"}:
++        elif event_type in {"follow", "join"}:
++            # New source reached the bot — notify admins once (dedup) so they
++            # can approve it via the dashboard / approval tool.
++            logger.info("LINE: lifecycle event %s from %s", event_type, source)
++            if not authorized:
++                await self._maybe_notify_new_source(source)
++        elif event_type in {"unfollow", "leave"}:
+             logger.info("LINE: lifecycle event %s from %s", event_type, source)
+         else:
+             logger.debug("LINE: ignoring event type %r", event_type)
+ 
+-    async def _handle_message_event(self, event: Dict[str, Any]) -> None:
++    async def _handle_message_event(
++        self, event: Dict[str, Any], *, authorized: bool = True
++    ) -> None:
+         msg = event.get("message") or {}
+         msg_type = msg.get("type", "")
+         message_id = msg.get("id", "")
+@@ -938,13 +1068,51 @@ class LineAdapter(BasePlatformAdapter):
+         chat_id, chat_type = _resolve_chat(source)
+         user_id = source.get("userId", "") or chat_id
+ 
+-        # Stash the reply token for outbound use.
++        # Stash the reply token for outbound use (reject replies use it too).
+         if chat_id and reply_token:
+             self._reply_tokens[chat_id] = (
+                 reply_token,
+                 time.time() + LINE_REPLY_TOKEN_TTL_SECONDS,
+             )
+ 
++        mentioned = _bot_mentioned(msg, self._bot_user_id)
++
++        # ---- Authorization / routing policy (whitelist subsystem) ----------
++        if chat_type == "dm":
++            if not authorized:
++                # Stranger DM: throttled English reply + notify admins (dedup)
++                # + record the attempt. Never trigger the agent. (§2.7)
++                await self._reject_unauthorized(
++                    chat_id=chat_id, chat_type=chat_type, user_id=user_id,
++                    reply_token=reply_token, attempt_text=_message_text(msg),
++                    dm=True,
++                )
++                return
++            # authorized DM → trigger (no @mention required)
++        else:  # group / room
++            if not authorized:
++                # Unauthorized group: reply English only if the bot was @'d
++                # (throttled) + notify admins (dedup). Non-@ stays silent, and
++                # we do NOT observe-record content from a non-whitelisted
++                # group. (§2.6 / §6.5)
++                if mentioned:
++                    await self._reject_unauthorized(
++                        chat_id=chat_id, chat_type=chat_type, user_id=user_id,
++                        reply_token=reply_token, attempt_text="", dm=False,
++                    )
++                return
++            # authorized group/room
++            if self._group_requires_mention(chat_id) and not mentioned:
++                # Passive observe-record — record as context, do NOT trigger. (§6)
++                await self._observe_record(
++                    source=source, chat_id=chat_id, chat_type=chat_type,
++                    user_id=user_id, msg=msg, msg_type=msg_type,
++                    message_id=message_id,
++                )
++                return
++            # mentioned (or requires_mention disabled) → trigger below
++
++        # ---- Trigger path: media + build event + handle_message ------------
+         # Handle media inbound — fetch the binary, cache it, and surface a
+         # vision-tool-friendly local path on the MessageEvent.
+         media_urls: List[str] = []
+@@ -969,16 +1137,27 @@ class LineAdapter(BasePlatformAdapter):
+         else:
+             text = f"[unsupported message type: {msg_type}]"
+ 
++        # Quote reply (§8): if this message quotes an earlier one, look the
++        # original up in the transcript and prepend it as context.
++        quote_ctx = await self._quote_context(source, chat_id, chat_type, msg)
++        if quote_ctx:
++            text = f"{quote_ctx}\n\n{text}" if text else quote_ctx
++
+         # Best-effort typing indicator (DM only).
+         if chat_type == "dm" and self._client:
+             asyncio.create_task(self._client.loading(chat_id))
+ 
++        # Best-effort display-name resolution (falls back to raw IDs). §2.3
++        user_name = await self._resolve_name(chat_id, chat_type, user_id) or user_id
++        chat_name = await self._resolve_chat_name(chat_id, chat_type) or chat_id
++
+         source_obj = self.build_source(
+             chat_id=chat_id,
+             chat_type=chat_type,
+             user_id=user_id,
+-            user_name=user_id,
+-            chat_name=chat_id,
++            user_name=user_name,
++            chat_name=chat_name,
++            message_id=message_id,
+         )
+ 
+         event_obj = MessageEvent(
+@@ -993,6 +1172,269 @@ class LineAdapter(BasePlatformAdapter):
+ 
+         await self.handle_message(event_obj)
+ 
++    # ------------------------------------------------------------------
++    # Whitelist subsystem — authorization / observe / notify / naming
++    # ------------------------------------------------------------------
++
++    def _source_authorized(self, source: Dict[str, Any]) -> bool:
++        """Authorized if the source matches the static env allowlists
++        (backward-compat) OR the live config-backed whitelist store (which
++        hot-reloads on every query)."""
++        if _allowed_for_source(
++            source,
++            allow_all=self.allow_all,
++            user_ids=self.allowed_users,
++            group_ids=self.allowed_groups,
++            room_ids=self.allowed_rooms,
++        ):
++            return True
++        if self._whitelist is not None:
++            sid, stype = _resolve_chat(source)
++            try:
++                return bool(sid) and self._whitelist.is_allowed(stype, sid)
++            except Exception:
++                logger.debug("LINE: whitelist store query failed", exc_info=True)
++        return False
++
++    def _group_requires_mention(self, chat_id: str) -> bool:
++        if self._whitelist is None:
++            return True
++        try:
++            return bool(self._whitelist.requires_mention(chat_id))
++        except Exception:
++            return True
++
++    async def _send_plain(self, chat_id: str, reply_token: str, text: str) -> None:
++        """Send one plain-text bubble via reply (preferred) or push fallback."""
++        if not self._client or not text:
++            return
++        messages = [_text_message(text)]
++        if reply_token:
++            try:
++                await self._client.reply(reply_token, messages)
++                return
++            except Exception:
++                logger.debug("LINE: plain reply failed, trying push", exc_info=True)
++        try:
++            await self._client.push(chat_id, messages)
++        except Exception:
++            logger.debug("LINE: plain push failed", exc_info=True)
++
++    def _load_gateway_config(self):
++        try:
++            from gateway.config import load_gateway_config
++            return load_gateway_config()
++        except Exception:
++            logger.debug("LINE: load_gateway_config failed", exc_info=True)
++            return None
++
++    async def _notify_admin_unauthorized(
++        self, chat_type: str, source_id: str, display: str = ""
++    ) -> None:
++        """Notify admins about an unauthorized/new source (deduped in helper)."""
++        if self._whitelist is None:
++            return
++        gw = self._load_gateway_config()
++        if gw is None:
++            return
++        try:
++            try:
++                from .whitelist_notify import notify_unauthorized
++            except ImportError:  # pragma: no cover - standalone plugin-loader path
++                from plugins.platforms.line.whitelist_notify import notify_unauthorized
++            await notify_unauthorized(
++                self._whitelist, gw,
++                source_type=chat_type, source_id=source_id, display=display,
++            )
++        except Exception:
++            logger.debug("LINE: notify_unauthorized failed", exc_info=True)
++
++    async def _maybe_notify_new_source(self, source: Dict[str, Any]) -> None:
++        sid, stype = _resolve_chat(source)
++        if not sid:
++            return
++        display = await self._resolve_chat_name(sid, stype) or sid
++        await self._notify_admin_unauthorized(stype, sid, display=display)
++
++    async def _reject_unauthorized(
++        self, *, chat_id: str, chat_type: str, user_id: str,
++        reply_token: str, attempt_text: str, dm: bool,
++    ) -> None:
++        """Unauthorized-source handling: notify admins (dedup), record the DM
++        attempt, and send a throttled English reply."""
++        display = await self._resolve_name(chat_id, chat_type, user_id) or user_id
++        await self._notify_admin_unauthorized(chat_type, chat_id, display=display)
++
++        if dm and self._whitelist is not None:
++            try:
++                self._whitelist.record_unauthorized_attempt(
++                    chat_id,
++                    {"user_id": user_id, "text": attempt_text, "ts": time.time()},
++                )
++            except Exception:
++                logger.debug("LINE: record_unauthorized_attempt failed", exc_info=True)
++
++        if self._whitelist is not None:
++            try:
++                if not self._whitelist.should_reply_unauthorized(chat_id):
++                    return
++            except Exception:
++                pass
++        await self._send_plain(
++            chat_id, reply_token, UNAUTH_DM_REPLY if dm else UNAUTH_GROUP_REPLY
++        )
++        if self._whitelist is not None:
++            try:
++                self._whitelist.mark_unauthorized_replied(chat_id)
++            except Exception:
++                logger.debug("LINE: mark_unauthorized_replied failed", exc_info=True)
++
++    # -- name resolution (TTL-cached, best-effort) --------------------------
++
++    def _name_cache_get(self, key: str) -> Optional[str]:
++        hit = self._name_cache.get(key)
++        if hit and hit[1] > time.time():
++            return hit[0]
++        return None
++
++    def _name_cache_put(self, key: str, value: Optional[str]) -> None:
++        if value:
++            self._name_cache[key] = (value, time.time() + self._name_cache_ttl)
++
++    async def _resolve_name(
++        self, chat_id: str, chat_type: str, user_id: str
++    ) -> Optional[str]:
++        """Display name of a user. DM → profile; group/room → member profile."""
++        if not user_id or not self._client:
++            return None
++        ck = (
++            f"u:{chat_id}:{user_id}"
++            if chat_type in {"group", "room"}
++            else f"u:{user_id}"
++        )
++        cached = self._name_cache_get(ck)
++        if cached:
++            return cached
++        try:
++            if chat_type == "dm":
++                name = await self._client.get_profile(user_id)
++            else:
++                name = await self._client.get_member_name(
++                    chat_id, user_id, chat_type=chat_type
++                )
++        except Exception:
++            name = None
++        self._name_cache_put(ck, name)
++        return name
++
++    async def _resolve_chat_name(
++        self, chat_id: str, chat_type: str
++    ) -> Optional[str]:
++        if not chat_id or not self._client or chat_type != "group":
++            return None
++        ck = f"g:{chat_id}"
++        cached = self._name_cache_get(ck)
++        if cached:
++            return cached
++        try:
++            name = await self._client.get_group_summary(chat_id)
++        except Exception:
++            name = None
++        self._name_cache_put(ck, name)
++        return name
++
++    # -- passive observe recording (§6) + quote reply (§8) ------------------
++
++    async def _observe_record(
++        self, *, source: Dict[str, Any], chat_id: str, chat_type: str,
++        user_id: str, msg: Dict[str, Any], msg_type: str, message_id: str,
++    ) -> None:
++        """Record a message as passive observed context (no agent turn).
++
++        Media policy (§7): drop video/audio entirely; record text; images and
++        files are recorded as a lightweight ``[type]`` placeholder (binary
++        retention/cleanup is a documented follow-up). The observed rows land in
++        a single shared, chat-scoped session (per-user identity dropped) so a
++        later @mention turn can load the whole group's context — mirroring the
++        Telegram observed-group-context mechanism.
++        """
++        if not self._observe_unmentioned:
++            return
++        store = getattr(self, "_session_store", None)
++        if store is None:
++            return
++        if msg_type in {"video", "audio"}:
++            return  # dropped by policy — not recorded, not fetched
++        if msg_type == "text":
++            body = msg.get("text", "") or ""
++        elif msg_type == "file":
++            fname = msg.get("fileName", "")
++            body = f"[file: {fname}]" if fname else "[file]"
++        elif msg_type in {"image", "sticker", "location"}:
++            body = f"[{msg_type}]"
++        else:
++            body = f"[{msg_type}]"
++        if not body:
++            return
++        name = await self._resolve_name(chat_id, chat_type, user_id) or user_id
++        content = f"[{name}|{user_id}]\n{body}"
++        try:
++            shared = self.build_source(
++                chat_id=chat_id,
++                chat_type=chat_type,
++                chat_name=(await self._resolve_chat_name(chat_id, chat_type) or chat_id),
++            )
++            entry = store.get_or_create_session(shared)
++            store.append_to_transcript(
++                entry.session_id,
++                {
++                    "role": "user",
++                    "content": content,
++                    "observed": True,
++                    "platform_message_id": message_id,
++                },
++            )
++        except Exception:
++            logger.debug("LINE: observe-record failed", exc_info=True)
++
++    async def _quote_context(
++        self, source: Dict[str, Any], chat_id: str, chat_type: str,
++        msg: Dict[str, Any],
++    ) -> Optional[str]:
++        """If this message quotes an earlier one (``quotedMessageId``), look up
++        the original in the transcript and return it as a context string.
++
++        Best-effort: degrades to a short marker if the original can't be
++        found (unrecorded, or aged out of retention). §8.
++        """
++        qmid = (msg or {}).get("quotedMessageId")
++        if not qmid:
++            return None
++        store = getattr(self, "_session_store", None)
++        if store is None:
++            return None
++        try:
++            if chat_type in {"group", "room"}:
++                lookup_src = self.build_source(chat_id=chat_id, chat_type=chat_type)
++            else:
++                lookup_src = self.build_source(
++                    chat_id=chat_id, chat_type=chat_type,
++                    user_id=source.get("userId"),
++                )
++            entry = store.get_or_create_session(lookup_src)
++            db = getattr(store, "_db", None)
++            if db is None or not hasattr(db, "get_messages"):
++                return "(In reply to an earlier message.)"
++            for row in db.get_messages(entry.session_id):
++                if str(row.get("platform_message_id") or "") == str(qmid):
++                    original = (row.get("content") or "").strip()
++                    if original:
++                        return f"[Quoted message]\n{original}"
++                    break
++        except Exception:
++            logger.debug("LINE: quote lookup failed", exc_info=True)
++        return "(In reply to an earlier message.)"
++
+     async def _handle_postback_event(self, event: Dict[str, Any]) -> None:
+         """User tapped the slow-LLM postback button — deliver cached payload."""
+         postback = event.get("postback") or {}

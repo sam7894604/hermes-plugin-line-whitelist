@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-plugin-line-whitelist"
+version = "0.1.0"
+description = "LINE whitelist / authorization subsystem for the Hermes LINE adapter — hot-reload allow-listing, @mention gating, unauthorized-notify, observed context, media retention, Dashboard CRUD + approval tool."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "sam7894604" }]
+keywords = ["hermes", "hermes-plugin", "line", "messaging", "whitelist", "authorization", "allowlist"]
+
+# Runtime: the store / notify helper / approval tool use the Python stdlib only.
+# The Dashboard plugin_api imports FastAPI + httpx, which a Hermes install that
+# serves its dashboard already provides. The whole subsystem also imports a few
+# Hermes-internal modules (hermes_cli.config, tools.registry, gateway.config,
+# hermes_state) supplied by the running host, not by PyPI — so there are no
+# install dependencies to declare here.
+dependencies = []
+
+[project.optional-dependencies]
+# Everything needed to run the bundled unit tests in a plain checkout. The test
+# harness (tests/conftest.py) stubs the Hermes host modules automatically, so no
+# Hermes install is required to run the tests — only pytest + FastAPI + httpx
+# (the last two are exercised by the Dashboard plugin tests).
+test = ["pytest>=7", "fastapi>=0.100", "httpx>=0.24"]
+
+[project.urls]
+Homepage = "https://github.com/sam7894604/hermes-plugin-line-whitelist"
+Source = "https://github.com/sam7894604/hermes-plugin-line-whitelist"
+
+# This repo is a *bundle* installed by copying files into a Hermes tree (see
+# README) — it is NOT pip-installed as a wheel. The shipped code lives under
+# ./src and is put on sys.path for the tests by tests/conftest.py, so no
+# setuptools package declaration is needed here.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

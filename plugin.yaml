@@ -1,0 +1,25 @@
+name: line-whitelist
+version: 0.1.0
+manifest_version: 1
+description: >-
+  LINE whitelist / authorization subsystem for the Hermes LINE adapter.
+  Adds hot-reloadable (config.yaml-backed) allow-listing with DM/group/room
+  scope isolation, admin no-delete protection, @mention gating, an English
+  "not authorized" reply + deduped admin notification for unauthorized
+  sources, passive observed-context recording for whitelisted groups, media
+  filtering + retention, and quote-reply lookup — plus a Dashboard CRUD plugin
+  and an agent-mediated approval tool. NOTE: part of this subsystem is an
+  in-place patch to the LINE adapter (see patches/line-adapter.diff); the rest
+  ships as the standalone files in this repo. Author: @sam7894604.
+
+# Agent tool this bundle registers (self-registers on import via tools/registry).
+provides_tools:
+  - line_whitelist   # admin-gated approve/list/remove of whitelist entries
+
+# The bundle also ships a Dashboard plugin (src/plugins/platforms/line/dashboard/)
+# discovered by the Hermes web server, and adapter-side runtime behavior applied
+# via patches/line-adapter.diff. See README.md for the full install steps.
+
+# Runtime deps beyond the Hermes host: the Dashboard plugin_api uses FastAPI +
+# httpx (already present in a Hermes install that serves the dashboard). The
+# store/notify/tool use the stdlib only. No PyPI install deps are declared here.

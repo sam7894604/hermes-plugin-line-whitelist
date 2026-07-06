@@ -1,0 +1,66 @@
+diff --git a/hermes_cli/tools_config.py b/hermes_cli/tools_config.py
+index eba4e4c0b..b8c22b692 100644
+--- a/hermes_cli/tools_config.py
++++ b/hermes_cli/tools_config.py
+@@ -77,6 +77,7 @@ CONFIGURABLE_TOOLSETS = [
+     ("clarify",         "❓ Clarifying Questions",      "clarify"),
+     ("delegation",      "👥 Task Delegation",           "delegate_task"),
+     ("cronjob",         "⏰ Cron Jobs",                 "create/list/update/pause/resume/run, with optional attached skills"),
++    ("line_whitelist",  "✅ LINE Whitelist",           "approve/list/remove LINE DM & group whitelist entries (admin-gated)"),
+     ("homeassistant",    "🏠 Home Assistant",           "smart home device control"),
+     ("spotify",          "🎵 Spotify",                  "playback, search, playlists, library"),
+     ("discord",         "💬 Discord (read/participate)", "fetch messages, search members, create thread"),
+@@ -115,7 +116,7 @@ def gui_toolset_label(label: str) -> str:
+ # `hermes tools` → X (Twitter) Search setup walks users through credential
+ # setup. The tool's check_fn means the schema still won't appear to the
+ # model if the credential later goes missing or expires.
+-_DEFAULT_OFF_TOOLSETS = {"homeassistant", "spotify", "discord", "discord_admin", "video", "video_gen", "x_search"}
++_DEFAULT_OFF_TOOLSETS = {"homeassistant", "spotify", "discord", "discord_admin", "video", "video_gen", "x_search", "line_whitelist"}
+ 
+ 
+ def _xai_credentials_present() -> bool:
+diff --git a/hermes_cli/web_server.py b/hermes_cli/web_server.py
+index 933432dc8..747dd0dfe 100644
+--- a/hermes_cli/web_server.py
++++ b/hermes_cli/web_server.py
+@@ -14494,6 +14494,9 @@ def _discover_dashboard_plugins() -> list:
+     search_dirs = [
+         (get_hermes_home() / "plugins", "user"),
+         (bundled_root / "memory", "bundled"),
++        # Platform plugins nest their dashboard under plugins/platforms/<name>/;
++        # scan that tier too so e.g. the LINE whitelist dashboard is discovered.
++        (bundled_root / "platforms", "bundled"),
+         (bundled_root, "bundled"),
+     ]
+     # GHSA-5qr3-c538-wm9j (#29156): the previous ``os.environ.get(...)``
+diff --git a/tools/delegate_tool.py b/tools/delegate_tool.py
+index 2baf4da30..0b52688c3 100644
+--- a/tools/delegate_tool.py
++++ b/tools/delegate_tool.py
+@@ -50,6 +50,7 @@ DELEGATE_BLOCKED_TOOLS = frozenset(
+         "send_message",  # no cross-platform side effects
+         "execute_code",  # children should reason step-by-step, not write scripts
+         "cronjob",  # no scheduling more work in the parent's name
++        "line_whitelist",  # no self-approving access-control changes
+     ]
+ )
+ 
+diff --git a/toolsets.py b/toolsets.py
+index 03e64fdba..edaaa02b8 100644
+--- a/toolsets.py
++++ b/toolsets.py
+@@ -186,7 +186,13 @@ TOOLSETS = {
+         "tools": ["cronjob"],
+         "includes": []
+     },
+-    
++
++    "line_whitelist": {
++        "description": "LINE whitelist management - approve/list/remove DM & group whitelist entries. Admin-gated (check_fn); off by default; excluded from subagents.",
++        "tools": ["line_whitelist"],
++        "includes": []
++    },
++
+ 
+     "file": {
+         "description": "File manipulation tools: read, write, patch (with fuzzy matching), and search (content + files)",

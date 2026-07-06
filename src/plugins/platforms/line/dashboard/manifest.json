@@ -1,0 +1,14 @@
+{
+  "name": "line-whitelist",
+  "label": "LINE Whitelist",
+  "description": "Manage the LINE bot allowlist (users / groups / rooms), browse LINE communication records, and resolve display names via the LINE profile API",
+  "icon": "ShieldCheck",
+  "version": "1.0.0",
+  "tab": {
+    "path": "/line-whitelist",
+    "position": "end"
+  },
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}

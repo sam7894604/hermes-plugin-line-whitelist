@@ -1,0 +1,348 @@
+/*
+ * Hermes LINE Whitelist dashboard plugin styles.
+ * Scoped under .hermes-line-* so nothing leaks into the host dashboard.
+ * Uses the host design-system CSS variables (--background, --foreground,
+ * --muted, --border, etc.) so it inherits the active theme.
+ */
+
+.hermes-line-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+  color: var(--foreground, #e5e7eb);
+}
+
+.hermes-line-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.hermes-line-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.hermes-line-card {
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 10px;
+  background: var(--card, var(--background, #131313));
+}
+
+.hermes-line-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+}
+
+.hermes-line-section-head {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--muted-foreground, #9ca3af);
+}
+
+.hermes-line-section-subhead {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted-foreground, #9ca3af);
+  margin-top: 4px;
+}
+
+/* --- add row ------------------------------------------------------------ */
+
+.hermes-line-addrow {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.hermes-line-scope-select { min-width: 110px; }
+.hermes-line-id-input { flex: 2 1 260px; }
+.hermes-line-note-input { flex: 1 1 160px; }
+
+/* --- scope blocks + chips ----------------------------------------------- */
+
+.hermes-line-scope-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.hermes-line-scope-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.hermes-line-count {
+  font-size: 11px;
+  padding: 0 6px;
+}
+
+.hermes-line-empty {
+  font-size: 12px;
+  color: var(--muted-foreground, #6b7280);
+  font-style: italic;
+}
+
+.hermes-line-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.hermes-line-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px 3px 10px;
+  border-radius: 999px;
+  background: var(--secondary, #1f2937);
+  border: 1px solid var(--border, #2a2a2a);
+  font-size: 12px;
+  max-width: 100%;
+}
+
+.hermes-line-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+.hermes-line-chip-note {
+  color: var(--muted-foreground, #9ca3af);
+  font-size: 11px;
+}
+
+.hermes-line-chip-x {
+  border: none;
+  background: transparent;
+  color: var(--muted-foreground, #9ca3af);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  padding: 0 2px;
+  border-radius: 999px;
+}
+.hermes-line-chip-x:hover:not(:disabled) { color: var(--destructive, #ef4444); }
+.hermes-line-chip-x:disabled { opacity: 0.4; cursor: default; }
+
+/* --- pending queue ------------------------------------------------------ */
+
+.hermes-line-pending {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.hermes-line-pending-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border, #2a2a2a);
+  background: var(--muted, #171717);
+}
+
+.hermes-line-pending-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.hermes-line-pending-name {
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hermes-line-pending-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--muted-foreground, #6b7280);
+}
+
+.hermes-line-pending-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* --- records ------------------------------------------------------------ */
+
+.hermes-line-records {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.hermes-line-record {
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+.hermes-line-record:hover { background: var(--muted, #1a1a1a); }
+.hermes-line-record--sel {
+  background: var(--muted, #1a1a1a);
+  border-color: var(--border, #2a2a2a);
+}
+
+.hermes-line-record-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.hermes-line-record-title {
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hermes-line-record-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--muted-foreground, #6b7280);
+  margin-top: 2px;
+}
+
+.hermes-line-record-key {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- messages ----------------------------------------------------------- */
+
+.hermes-line-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border, #2a2a2a);
+}
+
+.hermes-line-msg {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+  padding: 4px 6px;
+  border-radius: 6px;
+}
+.hermes-line-msg--user { background: var(--muted, #171717); }
+.hermes-line-msg--assistant { background: transparent; }
+
+.hermes-line-msg-role {
+  flex: 0 0 auto;
+  font-weight: 600;
+  color: var(--muted-foreground, #9ca3af);
+  min-width: 64px;
+}
+
+.hermes-line-msg-body { white-space: pre-wrap; word-break: break-word; }
+
+/* --- messages / errors -------------------------------------------------- */
+
+.hermes-line-msg-err {
+  font-size: 12px;
+  color: var(--destructive, #ef4444);
+}
+
+/* --- authorized list (store ∪ env overlay) ------------------------------ */
+
+.hermes-line-auth-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.hermes-line-auth-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--muted, #171717);
+}
+
+.hermes-line-auth-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.hermes-line-auth-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hermes-line-auth-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--muted-foreground, #9ca3af);
+}
+
+.hermes-line-auth-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hermes-line-auth-x {
+  margin-left: auto;
+}
+
+.hermes-line-lock {
+  font-size: 12px;
+  line-height: 1;
+}
+
+/* source / role badges */
+.hermes-line-src {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.hermes-line-src--store {
+  background: var(--secondary, #1f2937);
+  color: var(--secondary-foreground, #cbd5e1);
+}
+.hermes-line-src--env {
+  background: var(--accent, #3f2d0f);
+  color: var(--accent-foreground, #fbbf24);
+}
+.hermes-line-src--admin {
+  background: var(--destructive, #7f1d1d);
+  color: #fff;
+}

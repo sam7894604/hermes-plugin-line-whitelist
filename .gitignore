@@ -1,11 +1,12 @@
-# Python
+# Python — anchored to repo root so the dashboard's shipped
+# src/plugins/platforms/line/dashboard/dist/ UI bundle is NOT excluded.
 __pycache__/
 *.py[cod]
 *$py.class
 *.egg-info/
 .eggs/
-build/
-dist/
+/build/
+/dist/
 *.egg
 
 # Virtual environments

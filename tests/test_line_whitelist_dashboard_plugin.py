@@ -89,6 +89,9 @@ class _FakeStore:
         type(self)._pending = [p for p in self._pending if p["id"] != id]
         return len(self._pending) < before
 
+    def is_admin(self, id):
+        return (self._admin[0] == "user") and id == self._admin[1]
+
     def list(self, scope=None):
         if scope is None:
             return {k: list(v) for k, v in self._data.items()}
@@ -225,6 +228,87 @@ def test_remove_admin_is_409(client):
     # which the handler surfaces as 409.
     r = client.delete(f"{API}/whitelist/user/Uadmin")
     assert r.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# Authorized — merged store ∪ env overlay, admin + env lock, delete protection
+# ---------------------------------------------------------------------------
+
+
+def _find(rows, id):
+    for r in rows:
+        if r["id"] == id:
+            return r
+    return None
+
+
+def test_authorized_merges_store_and_env(client, monkeypatch):
+    # A normal store user, an admin store user, and an env-only user.
+    client.post(f"{API}/whitelist", json={"scope": "user", "id": "U123", "note": "me"})
+    client.post(f"{API}/whitelist", json={"scope": "user", "id": "Uadmin"})
+    monkeypatch.setenv("LINE_ALLOWED_USERS", "Uenv1, U123")  # env-only + overlap
+    monkeypatch.setenv("LINE_ALLOWED_GROUPS", "")
+    monkeypatch.setenv("LINE_ALLOWED_ROOMS", "")
+
+    r = client.get(f"{API}/authorized")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert set(body.keys()) == {"users", "groups", "rooms"}
+    users = body["users"]
+
+    normal = _find(users, "U123")
+    assert normal is not None
+    assert normal["source"] == "store"
+    assert normal["admin"] is False
+    assert normal["locked"] is False
+    assert normal["note"] == "me"
+    # U123 is also present in the env overlay → flagged, but stays store-managed.
+    assert normal.get("also_in_env") is True
+
+    admin = _find(users, "Uadmin")
+    assert admin is not None
+    assert admin["source"] == "store"
+    assert admin["admin"] is True
+    assert admin["locked"] is True
+
+    envonly = _find(users, "Uenv1")
+    assert envonly is not None
+    assert envonly["source"] == "env"
+    assert envonly["locked"] is True
+    # env-only ids appear once, not duplicated into the store list.
+    assert len([u for u in users if u["id"] == "Uenv1"]) == 1
+
+
+def test_authorized_env_only_groups_rooms(client, monkeypatch):
+    monkeypatch.setenv("LINE_ALLOWED_USERS", "")
+    monkeypatch.setenv("LINE_ALLOWED_GROUPS", "Cenv")
+    monkeypatch.setenv("LINE_ALLOWED_ROOMS", "Renv")
+
+    body = client.get(f"{API}/authorized").json()
+    g = _find(body["groups"], "Cenv")
+    assert g is not None and g["source"] == "env" and g["locked"] is True
+    room = _find(body["rooms"], "Renv")
+    assert room is not None and room["source"] == "env" and room["locked"] is True
+
+
+def test_delete_env_only_id_is_env_managed_200(client, monkeypatch):
+    # An env-overlay id is not in the store; delete does nothing but returns a
+    # clean 200 with env_managed:true so the UI can explain it's env-managed.
+    monkeypatch.setenv("LINE_ALLOWED_USERS", "Uenv1")
+    r = client.delete(f"{API}/whitelist/user/Uenv1")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["removed"] is False
+    assert body["already_absent"] is True
+    assert body["env_managed"] is True
+
+
+def test_delete_plain_absent_id_not_env_managed(client, monkeypatch):
+    monkeypatch.delenv("LINE_ALLOWED_USERS", raising=False)
+    r = client.delete(f"{API}/whitelist/user/Unope")
+    assert r.status_code == 200
+    assert r.json()["env_managed"] is False
 
 
 # ---------------------------------------------------------------------------

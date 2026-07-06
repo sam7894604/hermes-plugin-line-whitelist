@@ -133,6 +133,161 @@ def list_whitelist(
 
 
 # ---------------------------------------------------------------------------
+# GET /authorized  — merged authorized picture (store ∪ env overlay)
+# ---------------------------------------------------------------------------
+#
+# The LINE gate authorizes a source if it is in the store whitelist OR in the
+# env overlay (LINE_ALLOWED_USERS / _GROUPS / _ROOMS, comma-separated). The
+# plain ``GET /whitelist`` only surfaces the store half, so env-authorized ids
+# are invisible there. This endpoint merges both and annotates each entry with
+# ``source`` (store|env), ``admin`` (users only), and ``locked`` (admin OR env
+# — neither is deletable from the dashboard).
+
+# scope -> (store list bucket, store meta bucket, env var name)
+_AUTHORIZED_SCOPES = (
+    ("users", "LINE_ALLOWED_USERS"),
+    ("groups", "LINE_ALLOWED_GROUPS"),
+    ("rooms", "LINE_ALLOWED_ROOMS"),
+)
+
+
+def _parse_env_ids(var_name: str) -> list[str]:
+    """Parse a comma-separated env overlay var into a list of ids.
+
+    Blank entries and surrounding whitespace are dropped; order is preserved
+    and duplicates are de-duped (first occurrence wins).
+    """
+    raw = os.getenv(var_name, "") or ""
+    out: list[str] = []
+    seen: set[str] = set()
+    for part in raw.split(","):
+        ident = part.strip()
+        if ident and ident not in seen:
+            seen.add(ident)
+            out.append(ident)
+    return out
+
+
+def _store_entry_fields(bucket_meta: dict, raw_entry: Any) -> dict:
+    """Normalise one store list entry (+ its meta) to the /authorized shape.
+
+    Handles both store flavours:
+      * real store — the list holds bare id strings, names/notes live in the
+        separate ``meta[bucket]`` map keyed by id;
+      * a store whose list already holds ``{id, name, note, added_by,
+        added_at}`` dicts (meta folded in).
+    Meta (when present) fills any field the entry itself omits.
+    """
+    if isinstance(raw_entry, dict):
+        ident = str(raw_entry.get("id", ""))
+        entry = dict(raw_entry)
+    else:
+        ident = str(raw_entry)
+        entry = {"id": ident}
+    meta = bucket_meta.get(ident) if isinstance(bucket_meta, dict) else None
+    if isinstance(meta, dict):
+        for k in ("name", "note", "added_by", "added_at"):
+            if entry.get(k) in (None, "") and meta.get(k) not in (None, ""):
+                entry[k] = meta.get(k)
+    return {
+        "id": ident,
+        "name": entry.get("name") or "",
+        "note": entry.get("note") or "",
+        "added_by": entry.get("added_by") or "",
+        "added_at": entry.get("added_at"),
+    }
+
+
+@router.get("/authorized")
+def list_authorized():
+    """Return the merged authorized picture per scope (store ∪ env overlay).
+
+    Shape::
+
+        {"users":  [{id, name, added_by, added_at, note,
+                     source: "store"|"env", admin: bool, locked: bool,
+                     also_in_env?: bool}, ...],
+         "groups": [...],
+         "rooms":  [...]}
+
+    * STORE entries carry ``source:"store"`` and their meta (name/note/…). If
+      the same id is *also* present in the env overlay it is flagged
+      ``also_in_env:true`` (store is the managed copy, so ``source`` stays
+      "store").
+    * ENV-only entries carry ``source:"env"`` and ``locked:true`` — they are
+      managed via env, not removable from the dashboard.
+    * ``admin`` is ``store.is_admin(id)`` for the *users* scope (best-effort;
+      a store without that method degrades to ``False``).
+    * ``locked`` is ``True`` when ``admin`` OR ``source=="env"``; the UI hides
+      the delete button for locked rows.
+    * ``added_at`` is passed through raw (epoch seconds); the UI formats it.
+    """
+    store = _get_store()
+    is_admin = getattr(store, "is_admin", None)
+
+    try:
+        data = store.list()
+    except Exception as exc:
+        log.warning("authorized list failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"authorized list failed: {exc}")
+
+    meta = data.get("meta") if isinstance(data, dict) else None
+    meta = meta if isinstance(meta, dict) else {}
+
+    out: dict[str, list] = {}
+    for bucket, env_var in _AUTHORIZED_SCOPES:
+        bucket_meta = meta.get(bucket) if isinstance(meta.get(bucket), dict) else {}
+        env_ids = _parse_env_ids(env_var)
+        env_set = set(env_ids)
+
+        rows: list[dict] = []
+        store_ids: set[str] = set()
+        for raw_entry in (data.get(bucket) or []):
+            fields = _store_entry_fields(bucket_meta, raw_entry)
+            ident = fields["id"]
+            if not ident:
+                continue
+            store_ids.add(ident)
+            admin = False
+            if bucket == "users" and callable(is_admin):
+                try:
+                    admin = bool(is_admin(ident))
+                except Exception:
+                    admin = False
+            row = dict(fields)
+            row["source"] = "store"
+            row["admin"] = admin
+            row["locked"] = admin  # env doesn't lock a store-managed id
+            if ident in env_set:
+                row["also_in_env"] = True
+            rows.append(row)
+
+        # env-only ids (present in the overlay but not the store)
+        for ident in env_ids:
+            if ident in store_ids:
+                continue
+            admin = False
+            if bucket == "users" and callable(is_admin):
+                try:
+                    admin = bool(is_admin(ident))
+                except Exception:
+                    admin = False
+            rows.append({
+                "id": ident,
+                "name": "",
+                "note": "",
+                "added_by": "env",
+                "added_at": None,
+                "source": "env",
+                "admin": admin,
+                "locked": True,  # env-managed → not deletable from dashboard
+            })
+
+        out[bucket] = rows
+    return out
+
+
+# ---------------------------------------------------------------------------
 # POST /whitelist  — add {scope, id, note?}
 # ---------------------------------------------------------------------------
 
@@ -212,12 +367,29 @@ def remove_whitelist(scope: str, id: str):
             raise HTTPException(status_code=409, detail=str(exc))
         log.warning("whitelist remove failed: %s", exc)
         raise HTTPException(status_code=400, detail=str(exc))
+
+    # Env-overlay ids live in LINE_ALLOWED_{USERS,GROUPS,ROOMS}, not the store,
+    # so ``store.remove`` reports ``already_absent`` for them and deleting does
+    # nothing. When the id is *only* in the env overlay, say so cleanly (still a
+    # 200 — the store state the dashboard owns is unchanged and correct) with an
+    # ``env_managed`` hint so the UI can explain it must be edited via env.
+    env_var = {
+        "user": "LINE_ALLOWED_USERS",
+        "group": "LINE_ALLOWED_GROUPS",
+        "room": "LINE_ALLOWED_ROOMS",
+    }.get(scope)
+    env_managed = (
+        not removed
+        and env_var is not None
+        and id in _parse_env_ids(env_var)
+    )
     return {
         "ok": True,
         "scope": scope,
         "id": id,
         "removed": removed,
         "already_absent": not removed,
+        "env_managed": env_managed,
     }
 
 

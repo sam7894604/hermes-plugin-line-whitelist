@@ -60,6 +60,20 @@ class _FakeStore:
     approved_calls = []
     ignored_calls = []
 
+    # Settings + card_admins (Settings-panel contract). Class-level so every
+    # WhitelistStore() the handler constructs shares the same state per test.
+    _settings = {
+        "requires_mention": True,
+        "unauthorized_notify": "telegram:521703862",
+        "retention_days": 3,
+        "observe_unmentioned": True,
+        "allow_all_users": False,
+        "media": {"keep_types": ["image", "file"], "drop_types": ["video", "audio"]},
+    }
+    _card_admins = {"line": ["Uadmin"], "telegram": ["521703862"], "discord": []}
+    set_setting_calls = []
+    set_card_admins_calls = []
+
     @classmethod
     def reset(cls):
         cls._data = {"users": [], "groups": [], "rooms": []}
@@ -72,6 +86,40 @@ class _FakeStore:
         ]
         cls.approved_calls = []
         cls.ignored_calls = []
+        cls._settings = {
+            "requires_mention": True,
+            "unauthorized_notify": "telegram:521703862",
+            "retention_days": 3,
+            "observe_unmentioned": True,
+            "allow_all_users": False,
+            "media": {"keep_types": ["image", "file"], "drop_types": ["video", "audio"]},
+        }
+        cls._card_admins = {"line": ["Uadmin"], "telegram": ["521703862"], "discord": []}
+        cls.set_setting_calls = []
+        cls.set_card_admins_calls = []
+
+    # --- settings + card admins -----------------------------------------
+    # Only these keys are editable; anything else raises (like the real store).
+    _EDITABLE_SETTINGS = (
+        "requires_mention", "unauthorized_notify", "retention_days",
+        "observe_unmentioned", "allow_all_users", "media",
+    )
+
+    def get_settings(self):
+        return {k: v for k, v in self._settings.items()}
+
+    def set_setting(self, key, value):
+        type(self).set_setting_calls.append((key, value))
+        if key not in self._EDITABLE_SETTINGS:
+            raise _FakeWhitelistError(f"setting not editable: {key!r}")
+        type(self)._settings[key] = value
+
+    def card_admins(self):
+        return {k: list(v) for k, v in self._card_admins.items()}
+
+    def set_card_admins(self, platform, ids):
+        type(self).set_card_admins_calls.append((platform, list(ids)))
+        type(self)._card_admins[str(platform)] = list(ids)
 
     # --- pending queue ---------------------------------------------------
     def list_pending(self):
@@ -393,6 +441,107 @@ def test_pending_ignore_unknown_is_200(client):
     r = client.post(f"{API}/pending/Unknown999/ignore")
     assert r.status_code == 200
     assert r.json()["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# Settings panel — settings / card_admins / env (counts only, no tokens)
+# ---------------------------------------------------------------------------
+
+
+def test_settings_get_shape(client, monkeypatch):
+    monkeypatch.setenv("LINE_ALLOW_ALL_USERS", "false")
+    monkeypatch.setenv("LINE_ALLOWED_USERS", "U1, U2, U3")
+    monkeypatch.setenv("LINE_ALLOWED_GROUPS", "C1")
+    monkeypatch.setenv("LINE_ALLOWED_ROOMS", "")
+
+    r = client.get(f"{API}/settings")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert set(body.keys()) == {"settings", "card_admins", "env", "schema"}
+
+    # settings mirror the store
+    s = body["settings"]
+    assert s["requires_mention"] is True
+    assert s["retention_days"] == 3
+    assert s["media"]["keep_types"] == ["image", "file"]
+
+    # card_admins per platform
+    assert body["card_admins"]["telegram"] == ["521703862"]
+
+    # env: counts only, LINE_ALLOW_ALL_USERS literal value
+    env = body["env"]
+    assert env["LINE_ALLOW_ALL_USERS"] == "false"
+    assert env["LINE_ALLOWED_USERS_count"] == 3
+    assert env["LINE_ALLOWED_GROUPS_count"] == 1
+    assert env["LINE_ALLOWED_ROOMS_count"] == 0
+    # raw ids never surface — only counts.
+    assert "LINE_ALLOWED_USERS" not in env
+
+    # schema documents each config setting + env item with source/hot_reload.
+    keys = {row["key"] for row in body["schema"]}
+    assert {"requires_mention", "retention_days", "media"} <= keys
+    assert {"LINE_ALLOW_ALL_USERS", "LINE_ALLOWED_USERS"} <= keys
+    for row in body["schema"]:
+        assert row["source"] in ("config", "env")
+        assert isinstance(row["hot_reload"], bool)
+        if row["source"] == "env":
+            assert row["hot_reload"] is False
+
+
+def test_settings_get_never_leaks_secrets(client, monkeypatch):
+    # Even if token/secret env vars are set, they must NOT appear anywhere in
+    # the GET /settings output.
+    monkeypatch.setenv("LINE_CHANNEL_ACCESS_TOKEN", "supersecrettoken123")
+    monkeypatch.setenv("LINE_CHANNEL_SECRET", "shhh-secret-456")
+    monkeypatch.setenv("LINE_ALLOWED_USERS", "Uraw1, Uraw2")
+
+    r = client.get(f"{API}/settings")
+    assert r.status_code == 200
+    dumped = r.text
+    assert "supersecrettoken123" not in dumped
+    assert "shhh-secret-456" not in dumped
+    # raw allowed ids must not leak either — only counts.
+    assert "Uraw1" not in dumped
+    assert "Uraw2" not in dumped
+    assert r.json()["env"]["LINE_ALLOWED_USERS_count"] == 2
+
+
+def test_set_setting_calls_store(client):
+    r = client.post(f"{API}/settings/retention_days", json={"value": "7"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["key"] == "retention_days"
+    assert body["value"] == 7  # coerced to int
+    assert ("retention_days", 7) in _FakeStore.set_setting_calls
+
+
+def test_set_setting_bool_coercion(client):
+    r = client.post(f"{API}/settings/requires_mention", json={"value": "false"})
+    assert r.status_code == 200
+    assert r.json()["value"] is False
+    assert ("requires_mention", False) in _FakeStore.set_setting_calls
+
+
+def test_set_setting_non_editable_is_409(client):
+    # The fake store raises WhitelistError for a key not in its editable set.
+    r = client.post(f"{API}/settings/channel_access_token", json={"value": "x"})
+    assert r.status_code == 409
+
+
+def test_set_card_admins(client):
+    r = client.post(f"{API}/card-admins/telegram", json={"ids": ["111", " 222 ", ""]})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["platform"] == "telegram"
+    assert body["ids"] == ["111", "222"]  # trimmed + blanks dropped
+    assert ("telegram", ["111", "222"]) in _FakeStore.set_card_admins_calls
+
+
+def test_set_card_admins_unknown_platform_is_400(client):
+    r = client.post(f"{API}/card-admins/slack", json={"ids": ["1"]})
+    assert r.status_code == 400
 
 
 # ---------------------------------------------------------------------------

@@ -135,6 +135,40 @@ def test_is_notify_target_and_card_admin():
     assert store2.is_card_admin("telegram", "521703862") is False
 
 
+def test_card_admins_table_and_is_card_admin():
+    store, _ = make_store({
+        "admins": ["Uddf"],
+        "card_admins": {"line": ["Uddf"], "telegram": ["521703862"], "discord": ["Dc1"]},
+    })
+    assert store.card_admins()["telegram"] == ["521703862"]
+    # in the per-platform table -> admin, even if not a LINE admin / notify target
+    assert store.is_card_admin("telegram", "521703862") is True
+    assert store.is_card_admin("discord", "Dc1") is True
+    assert store.is_card_admin("telegram", "Uddf") is True   # LINE admin fallback
+    assert store.is_card_admin("telegram", "stranger") is False
+
+
+def test_set_card_admins_persists():
+    store, backend = make_store({})
+    store.set_card_admins("telegram", ["111", "222", "  "])   # blanks dropped
+    assert store.card_admins()["telegram"] == ["111", "222"]
+    assert store.is_card_admin("telegram", "222") is True
+
+
+def test_get_and_set_settings():
+    store, _ = make_store({"requires_mention": False, "retention_days": 7})
+    s = store.get_settings()
+    assert s["requires_mention"] is False and s["retention_days"] == 7
+    assert s["observe_unmentioned"] is True   # default
+    # write an editable setting -> hot reload visible
+    store.set_setting("retention_days", 14)
+    assert store.get_settings()["retention_days"] == 14
+    # non-editable key rejected
+    import pytest as _pytest
+    with _pytest.raises(WhitelistError):
+        store.set_setting("admins", ["Uhack"])
+
+
 def test_admin_no_delete_raises():
     store, _ = make_store(
         {"admins": ["Uadmin"], "whitelist": {"users": ["Uadmin"]}}

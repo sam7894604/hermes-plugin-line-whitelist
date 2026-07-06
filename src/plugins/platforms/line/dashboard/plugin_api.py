@@ -493,6 +493,178 @@ def ignore_pending(id: str):
 
 
 # ---------------------------------------------------------------------------
+# Settings panel — config-backed settings, card_admins, env (read-only)
+# ---------------------------------------------------------------------------
+#
+# Same lazy store import + auth as the rest. Three surfaces:
+#   GET  /settings              → settings + card_admins + env(counts) + schema
+#   POST /settings/{key}        → store.set_setting(key, value)   (409 if non-editable)
+#   POST /card-admins/{platform}→ store.set_card_admins(platform, ids)
+#
+# SECURITY: the env view NEVER reads or returns any *_TOKEN / *_SECRET / *_KEY.
+# For LINE_ALLOWED_* we surface only the COUNT of comma-separated ids, never the
+# raw ids. LINE_ALLOW_ALL_USERS is a plain boolean flag, shown as its literal
+# string value.
+
+# Card-admin platforms the Settings panel manages.
+_CARD_ADMIN_PLATFORMS = ("line", "telegram", "discord")
+
+# Hard-coded documentation of every config setting + env item. `source` marks
+# where the value lives; `hot_reload` is True for config (the store re-reads the
+# live config on every call) and False for env (needs a gateway restart).
+_SETTINGS_SCHEMA = [
+    {"key": "requires_mention", "label": "需要 @提及才回應 / Requires @mention",
+     "source": "config", "hot_reload": True, "default": True, "type": "bool"},
+    {"key": "observe_unmentioned", "label": "觀察未提及訊息 / Observe unmentioned",
+     "source": "config", "hot_reload": True, "default": True, "type": "bool"},
+    {"key": "allow_all_users", "label": "允許所有使用者(DM) / Allow all users",
+     "source": "config", "hot_reload": True, "default": False, "type": "bool"},
+    {"key": "retention_days", "label": "媒體保留天數 / Media retention (days)",
+     "source": "config", "hot_reload": True, "default": 3, "type": "int"},
+    {"key": "unauthorized_notify", "label": "未授權通知對象 / Unauthorized notify target",
+     "source": "config", "hot_reload": True, "default": None, "type": "text"},
+    {"key": "media", "label": "媒體類型保留/丟棄 / Media keep/drop types",
+     "source": "config", "hot_reload": True,
+     "default": {"keep_types": ["image", "file"], "drop_types": ["video", "audio"]},
+     "type": "list"},
+    {"key": "LINE_ALLOW_ALL_USERS", "label": "允許所有使用者(env) / Allow all users (env)",
+     "source": "env", "hot_reload": False, "default": None, "type": "text"},
+    {"key": "LINE_ALLOWED_USERS", "label": "已授權使用者數 / Allowed users (count)",
+     "source": "env", "hot_reload": False, "default": None, "type": "int"},
+    {"key": "LINE_ALLOWED_GROUPS", "label": "已授權群組數 / Allowed groups (count)",
+     "source": "env", "hot_reload": False, "default": None, "type": "int"},
+    {"key": "LINE_ALLOWED_ROOMS", "label": "已授權聊天室數 / Allowed rooms (count)",
+     "source": "env", "hot_reload": False, "default": None, "type": "int"},
+]
+
+
+def _env_view() -> dict:
+    """Masked env view for the Settings panel.
+
+    Only LINE_ALLOW_ALL_USERS (a boolean flag, safe as-is) and the *counts* of
+    the comma-separated LINE_ALLOWED_* overlays are surfaced — never the raw ids,
+    and never any *_TOKEN / *_SECRET / *_KEY value (none are read here at all).
+    """
+    return {
+        "LINE_ALLOW_ALL_USERS": os.getenv("LINE_ALLOW_ALL_USERS"),
+        "LINE_ALLOWED_USERS_count": len(_parse_env_ids("LINE_ALLOWED_USERS")),
+        "LINE_ALLOWED_GROUPS_count": len(_parse_env_ids("LINE_ALLOWED_GROUPS")),
+        "LINE_ALLOWED_ROOMS_count": len(_parse_env_ids("LINE_ALLOWED_ROOMS")),
+    }
+
+
+@router.get("/settings")
+def get_settings():
+    """Return everything the Settings panel needs to render.
+
+    Shape::
+
+        {"settings": {...},          # store.get_settings()
+         "card_admins": {...},       # store.card_admins()
+         "env": {LINE_ALLOW_ALL_USERS, LINE_ALLOWED_*_count},  # counts only
+         "schema": [...]}            # hard-coded field docs
+
+    The ``env`` block is deliberately count-only; no token/secret is read.
+    """
+    store = _get_store()
+    try:
+        settings = store.get_settings()
+    except Exception as exc:
+        log.warning("settings load failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"settings load failed: {exc}")
+
+    card_admins = {}
+    getter = getattr(store, "card_admins", None)
+    if callable(getter):
+        try:
+            card_admins = getter() or {}
+        except Exception as exc:
+            log.warning("card_admins load failed: %s", exc)
+            card_admins = {}
+
+    return {
+        "settings": settings,
+        "card_admins": card_admins,
+        "env": _env_view(),
+        "schema": [dict(s) for s in _SETTINGS_SCHEMA],
+    }
+
+
+class SetSettingBody(BaseModel):
+    value: Any = None
+
+
+def _coerce_setting(key: str, value: Any) -> Any:
+    """Coerce an incoming JSON value to the type the store expects for ``key``.
+
+    Bools accept true/false and common truthy/falsey strings; retention_days is
+    an int; everything else passes through. Coercion failures raise a 400.
+    """
+    bool_keys = {"requires_mention", "observe_unmentioned", "allow_all_users"}
+    if key in bool_keys:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        return bool(value)
+    if key == "retention_days":
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="retention_days must be an integer")
+    return value
+
+
+@router.post("/settings/{key}")
+def set_setting(key: str, payload: SetSettingBody):
+    """Write a single editable config setting via the store.
+
+    Coerces the value to a sensible type, then calls ``store.set_setting``. A
+    non-editable key raises ``WhitelistError`` in the store, mapped to 409.
+    """
+    store = _get_store()
+    WhitelistError = _whitelist_error_cls()
+    value = _coerce_setting(key, payload.value)
+    try:
+        store.set_setting(key, value)
+    except Exception as exc:
+        if WhitelistError is not None and isinstance(exc, WhitelistError):
+            raise HTTPException(status_code=409, detail=str(exc))
+        log.warning("set_setting %s failed: %s", key, exc)
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "key": key, "value": value}
+
+
+class SetCardAdminsBody(BaseModel):
+    ids: list = []
+
+
+@router.post("/card-admins/{platform}")
+def set_card_admins(platform: str, payload: SetCardAdminsBody):
+    """Replace a platform's card-admin id list.
+
+    ``platform`` must be one of line|telegram|discord (else 400). The id list is
+    passed to ``store.set_card_admins``; the store normalises/strips.
+    """
+    if platform not in _CARD_ADMIN_PLATFORMS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"platform must be one of {_CARD_ADMIN_PLATFORMS}",
+        )
+    ids = [str(i).strip() for i in (payload.ids or []) if str(i).strip()]
+    store = _get_store()
+    WhitelistError = _whitelist_error_cls()
+    try:
+        store.set_card_admins(platform, ids)
+    except Exception as exc:
+        if WhitelistError is not None and isinstance(exc, WhitelistError):
+            raise HTTPException(status_code=409, detail=str(exc))
+        log.warning("set_card_admins %s failed: %s", platform, exc)
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "platform": platform, "ids": ids}
+
+
+# ---------------------------------------------------------------------------
 # GET /records  — LINE communication records (reuses SessionDB)
 # ---------------------------------------------------------------------------
 

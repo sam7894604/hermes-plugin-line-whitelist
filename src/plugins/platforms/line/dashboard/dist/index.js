@@ -287,6 +287,224 @@
   }
 
   // -------------------------------------------------------------------------
+  // Settings section — card admins + config settings + env (read-only)
+  // -------------------------------------------------------------------------
+
+  const CARD_ADMIN_PLATFORMS = [
+    { platform: "line", label: "LINE" },
+    { platform: "telegram", label: "Telegram" },
+    { platform: "discord", label: "Discord" },
+  ];
+
+  // One platform's admin id list: chips + remove(x) + add input.
+  function CardAdminRow(props) {
+    const { platform, label, ids, busy, onSet } = props;
+    const [draft, setDraft] = useState("");
+
+    const add = useCallback(function () {
+      const id = (draft || "").trim();
+      if (!id) return;
+      if ((ids || []).indexOf(id) === -1) onSet(platform, (ids || []).concat([id]));
+      setDraft("");
+    }, [draft, ids, platform, onSet]);
+
+    const remove = useCallback(function (id) {
+      onSet(platform, (ids || []).filter(function (x) { return x !== id; }));
+    }, [ids, platform, onSet]);
+
+    return h("div", { className: "hermes-line-ca-row" },
+      h("div", { className: "hermes-line-ca-plat" }, label),
+      h("div", { className: "hermes-line-chips" },
+        (ids || []).length === 0
+          ? h("span", { className: "hermes-line-empty" }, "none")
+          : (ids || []).map(function (id) {
+              return h("span", { key: id, className: "hermes-line-chip" },
+                h("span", { className: "hermes-line-chip-label" }, id),
+                h("button", {
+                  className: "hermes-line-chip-x",
+                  disabled: !!busy,
+                  title: "Remove",
+                  onClick: function () { remove(id); },
+                }, "×"),
+              );
+            })
+      ),
+      h("div", { className: "hermes-line-addrow" },
+        h(Input, {
+          value: draft,
+          placeholder: "add id",
+          onChange: function (e) { setDraft(e.target.value); },
+          onKeyDown: function (e) { if (e.key === "Enter") add(); },
+          className: "hermes-line-id-input",
+        }),
+        h(Button, { size: "sm", disabled: !!busy || !draft.trim(), onClick: add }, "Add"),
+      ),
+    );
+  }
+
+  // A small "config · hot-reload" / "env · 需重啟" badge for a schema row.
+  function SchemaBadge(props) {
+    const row = props.row || {};
+    const isEnv = row.source === "env";
+    return h(Badge, {
+      className: isEnv
+        ? "hermes-line-src hermes-line-src--env"
+        : "hermes-line-src hermes-line-src--store",
+      title: isEnv ? "在 .env 編輯，需重啟 gateway" : "hot-reload",
+    }, isEnv ? "env · 需重啟" : "config · hot-reload");
+  }
+
+  // One editable config setting, control chosen by schema type.
+  function SettingRow(props) {
+    const { row, value, busy, onSet } = props;
+    const key = row.key;
+    const type = row.type;
+
+    let control;
+    if (type === "bool") {
+      control = h("input", {
+        type: "checkbox",
+        checked: !!value,
+        disabled: !!busy,
+        onChange: function (e) { onSet(key, e.target.checked); },
+      });
+    } else if (type === "int") {
+      control = h(Input, {
+        type: "number",
+        value: value == null ? "" : String(value),
+        disabled: !!busy,
+        className: "hermes-line-set-num",
+        onChange: function (e) { onSet(key, e.target.value); },
+      });
+    } else if (type === "list") {
+      // media { keep_types, drop_types } — edit as two comma strings.
+      const media = value && typeof value === "object" ? value : {};
+      const keep = (media.keep_types || []).join(", ");
+      const drop = (media.drop_types || []).join(", ");
+      const parse = function (s) {
+        return (s || "").split(",").map(function (x) { return x.trim(); }).filter(Boolean);
+      };
+      control = h("div", { className: "hermes-line-media-edit" },
+        h("div", { className: "hermes-line-media-field" },
+          h(Label, null, "keep"),
+          h(Input, {
+            defaultValue: keep,
+            disabled: !!busy,
+            onBlur: function (e) {
+              onSet(key, { keep_types: parse(e.target.value), drop_types: parse(drop) });
+            },
+          }),
+        ),
+        h("div", { className: "hermes-line-media-field" },
+          h(Label, null, "drop"),
+          h(Input, {
+            defaultValue: drop,
+            disabled: !!busy,
+            onBlur: function (e) {
+              onSet(key, { keep_types: parse(keep), drop_types: parse(e.target.value) });
+            },
+          }),
+        ),
+      );
+    } else {
+      // text
+      control = h(Input, {
+        defaultValue: value == null ? "" : String(value),
+        disabled: !!busy,
+        onBlur: function (e) { onSet(key, e.target.value); },
+      });
+    }
+
+    return h("div", { className: "hermes-line-set-row" },
+      h("div", { className: "hermes-line-set-head" },
+        h("span", { className: "hermes-line-set-label" }, row.label || key),
+        h(SchemaBadge, { row: row }),
+      ),
+      h("div", { className: "hermes-line-set-control" }, control),
+      row["default"] !== undefined
+        ? h("div", { className: "hermes-line-set-hint" },
+            "default: " + JSON.stringify(row["default"]))
+        : null,
+    );
+  }
+
+  function SettingsSection(props) {
+    const { settings, cardAdmins, env, schema, loading, busy, onSetSetting, onSetCardAdmins } = props;
+
+    const configSchema = (schema || []).filter(function (r) { return r.source === "config"; });
+    const envSchema = (schema || []).filter(function (r) { return r.source === "env"; });
+
+    // env count lookup: schema key → count field in the env payload.
+    const envCount = {
+      LINE_ALLOWED_USERS: (env || {}).LINE_ALLOWED_USERS_count,
+      LINE_ALLOWED_GROUPS: (env || {}).LINE_ALLOWED_GROUPS_count,
+      LINE_ALLOWED_ROOMS: (env || {}).LINE_ALLOWED_ROOMS_count,
+    };
+
+    return h(Card, { className: "hermes-line-card" },
+      h(CardContent, { className: "hermes-line-card-body" },
+        h("div", { className: "hermes-line-section-head" }, "Settings / 設定"),
+        loading
+          ? h("div", { className: "hermes-line-empty" }, "loading…")
+          : h("div", { className: "hermes-line-settings" },
+
+              // 1. Card admins ------------------------------------------------
+              h("div", { className: "hermes-line-set-group" },
+                h("div", { className: "hermes-line-section-subhead" }, "Card Admins / 卡片授權對應表"),
+                h("div", { className: "hermes-line-hint" },
+                  "該平台按鈕來源 id 在清單內即可操作互動卡。"),
+                CARD_ADMIN_PLATFORMS.map(function (p) {
+                  return h(CardAdminRow, {
+                    key: p.platform,
+                    platform: p.platform,
+                    label: p.label,
+                    ids: (cardAdmins || {})[p.platform] || [],
+                    busy: busy,
+                    onSet: onSetCardAdmins,
+                  });
+                }),
+              ),
+
+              // 2. Config settings (hot-reload) -------------------------------
+              h("div", { className: "hermes-line-set-group" },
+                h("div", { className: "hermes-line-section-subhead" }, "設定 (config · hot-reload)"),
+                configSchema.map(function (row) {
+                  return h(SettingRow, {
+                    key: row.key,
+                    row: row,
+                    value: (settings || {})[row.key],
+                    busy: busy,
+                    onSet: onSetSetting,
+                  });
+                }),
+              ),
+
+              // 3. Env (read-only) --------------------------------------------
+              h("div", { className: "hermes-line-set-group" },
+                h("div", { className: "hermes-line-section-subhead" }, "環境變數 (env · 唯讀)"),
+                h("div", { className: "hermes-line-hint" },
+                  "這些於 .env 編輯，儲存後需重啟 gateway。不顯示任何 token。"),
+                envSchema.map(function (row) {
+                  const isFlag = row.key === "LINE_ALLOW_ALL_USERS";
+                  const shown = isFlag
+                    ? String((env || {}).LINE_ALLOW_ALL_USERS)
+                    : (envCount[row.key] == null ? "0" : String(envCount[row.key]));
+                  return h("div", { key: row.key, className: "hermes-line-env-row" },
+                    h("div", { className: "hermes-line-set-head" },
+                      h("span", { className: "hermes-line-set-label" }, row.label || row.key),
+                      h(SchemaBadge, { row: row }),
+                    ),
+                    h("div", { className: "hermes-line-env-val" },
+                      isFlag ? shown : (shown + " ids")),
+                  );
+                }),
+              ),
+            ),
+      ),
+    );
+  }
+
+  // -------------------------------------------------------------------------
   // Records section — LINE communication records (reuses session data)
   // -------------------------------------------------------------------------
 
@@ -365,6 +583,12 @@
     const [pending, setPending] = useState([]);
     const [pendLoading, setPendLoading] = useState(true);
 
+    const [settings, setSettings] = useState({});
+    const [cardAdmins, setCardAdmins] = useState({});
+    const [env, setEnv] = useState({});
+    const [schema, setSchema] = useState([]);
+    const [setLoading, setSetLoading] = useState(true);
+
     const [records, setRecords] = useState([]);
     const [recLoading, setRecLoading] = useState(true);
     const [selected, setSelected] = useState(null);
@@ -427,9 +651,25 @@
         .finally(function () { setPendLoading(false); });
     }, []);
 
+    // ---- settings load ----------------------------------------------------
+    const loadSettings = useCallback(function () {
+      setSetLoading(true);
+      return SDK.fetchJSON(`${API}/settings`)
+        .then(function (data) {
+          setSettings((data && data.settings) || {});
+          setCardAdmins((data && data.card_admins) || {});
+          setEnv((data && data.env) || {});
+          setSchema((data && data.schema) || []);
+        })
+        .catch(function () {
+          setSettings({}); setCardAdmins({}); setEnv({}); setSchema([]);
+        })
+        .finally(function () { setSetLoading(false); });
+    }, []);
+
     useEffect(function () {
-      loadWhitelist(); loadAuthorized(); loadPending(); loadRecords();
-    }, [loadWhitelist, loadAuthorized, loadPending, loadRecords]);
+      loadWhitelist(); loadAuthorized(); loadPending(); loadSettings(); loadRecords();
+    }, [loadWhitelist, loadAuthorized, loadPending, loadSettings, loadRecords]);
 
     // ---- add / remove -----------------------------------------------------
     const onAdd = useCallback(function (body) {
@@ -485,6 +725,31 @@
         .finally(function () { setBusy(false); });
     }, [loadPending]);
 
+    // ---- settings: set a config value / a platform's card admins ----------
+    const onSetSetting = useCallback(function (key, value) {
+      setBusy(true);
+      SDK.fetchJSON(`${API}/settings/${encodeURIComponent(key)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ value: value }),
+      })
+        .then(function () { setWlError(null); return loadSettings(); })
+        .catch(function (e) { setWlError(String(e && e.message || e)); return loadSettings(); })
+        .finally(function () { setBusy(false); });
+    }, [loadSettings]);
+
+    const onSetCardAdmins = useCallback(function (platform, ids) {
+      setBusy(true);
+      SDK.fetchJSON(`${API}/card-admins/${encodeURIComponent(platform)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: ids }),
+      })
+        .then(function () { setWlError(null); return loadSettings(); })
+        .catch(function (e) { setWlError(String(e && e.message || e)); return loadSettings(); })
+        .finally(function () { setBusy(false); });
+    }, [loadSettings]);
+
     // ---- open a record's messages ----------------------------------------
     const onOpen = useCallback(function (sessionId) {
       if (selected === sessionId) { setSelected(null); setMessages([]); return; }
@@ -500,7 +765,7 @@
       h("div", { className: "hermes-line-header" },
         h("h2", { className: "hermes-line-title" }, "LINE Whitelist"),
         h(Button, { size: "sm", variant: "outline", onClick: function () {
-          loadWhitelist(); loadAuthorized(); loadPending(); loadRecords();
+          loadWhitelist(); loadAuthorized(); loadPending(); loadSettings(); loadRecords();
         } }, "Refresh"),
       ),
       h(PendingSection, {
@@ -516,6 +781,16 @@
         busy: busy,
         onRemove: onRemove,
         resolveName: resolveName,
+      }),
+      h(SettingsSection, {
+        settings: settings,
+        cardAdmins: cardAdmins,
+        env: env,
+        schema: schema,
+        loading: setLoading,
+        busy: busy,
+        onSetSetting: onSetSetting,
+        onSetCardAdmins: onSetCardAdmins,
       }),
       h(WhitelistSection, {
         data: whitelist,

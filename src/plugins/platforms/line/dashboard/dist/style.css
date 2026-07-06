@@ -354,3 +354,95 @@
   color: var(--muted-foreground, #8a8f98);
   opacity: 0.8;
 }
+
+/* --- settings panel ----------------------------------------------------- */
+
+.hermes-line-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.hermes-line-set-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border, #2a2a2a);
+}
+.hermes-line-set-group:last-child { border-bottom: none; padding-bottom: 0; }
+
+/* card admins */
+.hermes-line-ca-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--muted, #171717);
+}
+.hermes-line-ca-plat {
+  flex: 0 0 auto;
+  min-width: 74px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* config setting rows */
+.hermes-line-set-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--muted, #171717);
+}
+.hermes-line-set-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.hermes-line-set-label {
+  font-size: 13px;
+  font-weight: 500;
+}
+.hermes-line-set-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.hermes-line-set-num { max-width: 120px; }
+.hermes-line-set-hint {
+  font-size: 11px;
+  color: var(--muted-foreground, #6b7280);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.hermes-line-media-edit {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.hermes-line-media-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* env (read-only) rows */
+.hermes-line-env-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--muted, #171717);
+}
+.hermes-line-env-val {
+  font-size: 13px;
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}

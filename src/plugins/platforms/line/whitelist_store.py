@@ -205,10 +205,67 @@ class WhitelistStore:
             return p == platform and cid == str(caller_id)
         return False
 
+    def card_admins(self) -> Dict[str, list]:
+        """Per-platform admin id lists for interactive-card authorization.
+
+        Shape: ``{"line": ["U…"], "telegram": ["521703862"], "discord": [...]}``
+        under ``platforms.line.card_admins``. Managed from the Dashboard Settings
+        panel. Empty/absent platforms fall back to the legacy checks.
+        """
+        raw = self._as_dict(self._line_config().get("card_admins"))
+        return {k: self._as_list(v) for k, v in raw.items()}
+
+    def set_card_admins(self, platform: str, ids: list) -> None:
+        """Replace the admin id list for ``platform`` and persist."""
+        table = self.card_admins()
+        table[str(platform)] = [str(i).strip() for i in (ids or []) if str(i).strip()]
+        self._write_field("card_admins", table)
+
     def is_card_admin(self, platform: str, caller_id: str) -> bool:
-        """Admin check for interactive-card callbacks: a LINE whitelist admin
-        OR the notify recipient on the tapping ``platform``."""
+        """Admin check for interactive-card callbacks.
+
+        Authorized if ``caller_id`` is in the per-platform ``card_admins`` table
+        (the managed mechanism), OR a LINE whitelist admin, OR the configured
+        notify recipient on the tapping ``platform`` (legacy fallbacks).
+        """
+        if not caller_id:
+            return False
+        if str(caller_id) in self.card_admins().get(str(platform), []):
+            return True
         return self.is_admin(caller_id) or self.is_notify_target(platform, caller_id)
+
+    # ------------------------------------------------------------------
+    # managed settings (Dashboard Settings panel)
+    # ------------------------------------------------------------------
+    # Config keys the Settings panel may write (config-backed, hot-reload).
+    _EDITABLE_SETTINGS = (
+        "requires_mention", "unauthorized_notify", "retention_days",
+        "observe_unmentioned", "allow_all_users", "media",
+    )
+
+    def get_settings(self) -> Dict[str, Any]:
+        """Current values of the config-backed, Dashboard-editable settings."""
+        line = self._line_config()
+        return {
+            "requires_mention": bool(line.get("requires_mention", _DEFAULT_REQUIRES_MENTION)),
+            "unauthorized_notify": line.get("unauthorized_notify"),
+            "retention_days": int(line.get("retention_days", _DEFAULT_RETENTION_DAYS) or _DEFAULT_RETENTION_DAYS),
+            "observe_unmentioned": bool(line.get("observe_unmentioned", True)),
+            "allow_all_users": bool(line.get("allow_all_users", False)),
+            "media": self._as_dict(line.get("media")) or {
+                "keep_types": ["image", "file"], "drop_types": ["video", "audio"]
+            },
+        }
+
+    def set_setting(self, key: str, value: Any) -> None:
+        """Write a single editable ``platforms.line.<key>`` and persist.
+
+        Raises :class:`WhitelistError` for a key not in the editable allowlist
+        (so the endpoint can't be used to write arbitrary config paths).
+        """
+        if key not in self._EDITABLE_SETTINGS:
+            raise WhitelistError(f"setting not editable: {key!r}")
+        self._write_field(key, value)
 
     def list(self, scope: Optional[str] = None) -> dict:
         """Return the whitelist plus meta.

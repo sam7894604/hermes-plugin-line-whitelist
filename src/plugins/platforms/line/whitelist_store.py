@@ -186,6 +186,30 @@ class WhitelistStore:
     def is_admin(self, user_id: str) -> bool:
         return user_id in self._as_list(self._line_config().get("admins"))
 
+    def is_notify_target(self, platform: str, caller_id: str) -> bool:
+        """True if ``caller_id`` is the configured ``unauthorized_notify``
+        recipient on ``platform``.
+
+        Interactive decision cards are delivered to (and tapped from) the
+        *notify* platform — e.g. Telegram — so a button tap arrives with the
+        Telegram user id, which will never match the LINE ``admins`` list.
+        The person who RECEIVES the card is authorized to act on it, so the
+        card callback treats the notify recipient as an admin for that platform.
+        Target format: ``"telegram:521703862"`` (``"<platform>:<chat_id>"``).
+        """
+        if not caller_id:
+            return False
+        target = str(self._line_config().get("unauthorized_notify") or "")
+        if ":" in target:
+            p, cid = target.split(":", 1)
+            return p == platform and cid == str(caller_id)
+        return False
+
+    def is_card_admin(self, platform: str, caller_id: str) -> bool:
+        """Admin check for interactive-card callbacks: a LINE whitelist admin
+        OR the notify recipient on the tapping ``platform``."""
+        return self.is_admin(caller_id) or self.is_notify_target(platform, caller_id)
+
     def list(self, scope: Optional[str] = None) -> dict:
         """Return the whitelist plus meta.
 

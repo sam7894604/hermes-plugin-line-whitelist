@@ -116,6 +116,25 @@ def test_is_admin():
     assert store.is_admin("Uother") is False
 
 
+def test_is_notify_target_and_card_admin():
+    # Cross-platform card admin: the unauthorized_notify recipient can act on
+    # the decision card even though their platform id isn't a LINE admin id.
+    store, _ = make_store(
+        {"admins": ["Uddf"], "unauthorized_notify": "telegram:521703862"}
+    )
+    assert store.is_notify_target("telegram", "521703862") is True
+    assert store.is_notify_target("telegram", "999") is False
+    assert store.is_notify_target("discord", "521703862") is False  # wrong platform
+    # is_card_admin = LINE admin OR notify recipient on that platform
+    assert store.is_card_admin("telegram", "521703862") is True     # notify recipient
+    assert store.is_card_admin("telegram", "Uddf") is True          # LINE admin
+    assert store.is_card_admin("telegram", "Ustranger") is False
+    # no notify target configured -> only LINE admins pass
+    store2, _ = make_store({"admins": ["Uddf"]})
+    assert store2.is_notify_target("telegram", "521703862") is False
+    assert store2.is_card_admin("telegram", "521703862") is False
+
+
 def test_admin_no_delete_raises():
     store, _ = make_store(
         {"admins": ["Uadmin"], "whitelist": {"users": ["Uadmin"]}}

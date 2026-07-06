@@ -50,6 +50,16 @@ _SCOPE_TO_METAKEY: Dict[str, str] = {
     "room": "rooms",
 }
 
+# LINE id prefix -> store scope. Fallback for pending entries that predate the
+# ``source_type`` field (e.g. a legacy ``unauthorized_seen`` row written before
+# the pending-queue feature): U… = user/DM, C… = group, R… = room.
+_ID_PREFIX_TO_SCOPE: Dict[str, str] = {"U": "dm", "C": "group", "R": "room"}
+
+
+def _infer_scope_from_id(source_id: str) -> str:
+    """Best-effort scope from a LINE id prefix; '' if unrecognised."""
+    return _ID_PREFIX_TO_SCOPE.get((source_id or "")[:1].upper(), "")
+
 _DEFAULT_RETENTION_DAYS = 3
 _DEFAULT_REQUIRES_MENTION = True
 
@@ -409,7 +419,9 @@ class WhitelistStore:
             entry = self._as_dict(raw)
             if entry.get("status") == "ignored":
                 continue
-            source_type = entry.get("source_type", "")
+            # Infer source_type from the id prefix for legacy entries so the UI
+            # shows the right type and the "already whitelisted" filter works.
+            source_type = entry.get("source_type", "") or _infer_scope_from_id(source_id)
             if source_type and self.is_allowed(source_type, source_id):
                 continue
             last_seen = entry.get("last_seen", entry.get("first_seen", 0.0))
@@ -446,7 +458,11 @@ class WhitelistStore:
         entry = self._as_dict(seen.get(source_id))
         scope = entry.get("source_type", "")
         if scope not in _SCOPE_TO_LISTKEY:
-            return {"approved": False, "reason": "not found", "id": source_id}
+            # Legacy entry with no source_type (or a bad one): fall back to the
+            # LINE id prefix so it can still be approved (U→dm/C→group/R→room).
+            scope = _infer_scope_from_id(source_id)
+        if scope not in _SCOPE_TO_LISTKEY:
+            return {"approved": False, "reason": "unresolved scope", "id": source_id}
         self.add(
             scope, source_id, added_by=added_by, name=entry.get("name", "")
         )

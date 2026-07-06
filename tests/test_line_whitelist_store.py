@@ -366,6 +366,36 @@ def test_approve_pending_dm_maps_to_users():
     assert "Uxyz" in store.list()["users"]
 
 
+def test_approve_pending_legacy_entry_infers_scope_from_id():
+    # Regression: a legacy unauthorized_seen row (written before the pending
+    # feature) has NO source_type — the dashboard "approve" button was a no-op
+    # (approved:False, nothing added). Now the scope is inferred from the LINE
+    # id prefix (C -> group), so approve actually whitelists it.
+    store, backend = make_store(
+        {"unauthorized_seen": {
+            "Cbb218legacyid": {"first_seen": 1.0, "last_notified": 1.0, "count": 1}
+        }}
+    )
+    # it shows in pending with an inferred source_type
+    pend = store.list_pending()
+    assert len(pend) == 1 and pend[0]["id"] == "Cbb218legacyid"
+    assert pend[0]["source_type"] == "group"
+    # and approve now works (was False before the fix)
+    res = store.approve_pending("Cbb218legacyid", added_by="Uadmin")
+    assert res == {"approved": True, "scope": "group", "id": "Cbb218legacyid"}
+    assert store.is_allowed("group", "Cbb218legacyid") is True
+    assert store.list_pending() == []       # cleared from pending
+
+
+def test_approve_pending_unresolvable_id_returns_false():
+    # An id with no recognisable prefix and no source_type stays a clean no-op.
+    store, _ = make_store(
+        {"unauthorized_seen": {"weirdid": {"first_seen": 1.0, "count": 1}}}
+    )
+    res = store.approve_pending("weirdid")
+    assert res["approved"] is False and res["reason"] == "unresolved scope"
+
+
 # ---------------------------------------------------------------------------
 # pending queue: ignore_pending
 # ---------------------------------------------------------------------------

@@ -242,11 +242,13 @@ class WhitelistStore:
         # a newly authorized source should not carry stale reject state
         self.clear_unauthorized(source_id)
 
-    def remove(self, scope: str, source_id: str) -> None:
+    def remove(self, scope: str, source_id: str) -> bool:
         """Remove ``source_id`` from ``scope``.
 
-        Raises :class:`WhitelistError` if the id is a protected admin
-        (admin no-delete).
+        Idempotent: returns ``True`` if the id was present (and has now been
+        removed + persisted), ``False`` if it was already absent (a no-op — the
+        desired end state already holds). Raises :class:`WhitelistError` if the
+        scope is unknown or the id is a protected admin (admin no-delete).
         """
         list_key = _SCOPE_TO_LISTKEY.get(scope)
         if list_key is None:
@@ -259,10 +261,11 @@ class WhitelistStore:
 
         wl = self._whitelist()
         current = self._as_list(wl.get(list_key))
-        if source_id in current:
-            current = [x for x in current if x != source_id]
-            wl[list_key] = current
-            self._write_field("whitelist", wl)
+        if source_id not in current:
+            return False
+        wl[list_key] = [x for x in current if x != source_id]
+        self._write_field("whitelist", wl)
+        return True
 
     # ------------------------------------------------------------------
     # unauthorized dedup / throttle (§2.6)

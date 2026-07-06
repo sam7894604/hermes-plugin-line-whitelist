@@ -157,14 +157,26 @@ def test_remove(client):
     client.post(f"{API}/whitelist", json={"scope": "room", "id": "R9"})
     r = client.delete(f"{API}/whitelist/room/R9")
     assert r.status_code == 200
-    assert r.json()["ok"] is True
+    body = r.json()
+    assert body["ok"] is True
+    assert body["removed"] is True          # was present → actually removed
+    assert body["already_absent"] is False
     # gone now
     assert client.get(f"{API}/whitelist").json()["rooms"] == []
 
 
-def test_remove_unknown_is_404(client):
+def test_remove_unknown_is_idempotent_200(client):
+    # Removing an id that isn't in the whitelist is idempotent: the desired end
+    # state ("not in whitelist") already holds, so it's a 200, not a 404.
+    # Regression: a genuine delete used to be mis-reported to the UI as a 404
+    # while the config was in fact written (store.remove returned None, which
+    # the handler read as "not found").
     r = client.delete(f"{API}/whitelist/user/Unope")
-    assert r.status_code == 404
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["removed"] is False
+    assert body["already_absent"] is True
 
 
 def test_remove_admin_is_409(client):

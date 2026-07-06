@@ -176,9 +176,21 @@ def test_add_clears_unauthorized_seen():
 
 def test_remove_deletes_from_scope():
     store, _ = make_store({"whitelist": {"groups": ["Cabc", "Cdef"]}})
-    store.remove("group", "Cabc")
+    # remove of a present id returns True (was present, now removed)
+    assert store.remove("group", "Cabc") is True
     assert store.is_allowed("group", "Cabc") is False
     assert store.is_allowed("group", "Cdef") is True
+
+
+def test_remove_absent_is_idempotent_false():
+    # Removing something that isn't there is a no-op that returns False — never
+    # an error. (Regression: the store used to return None here, which the
+    # Dashboard handler mis-read as a 404 even on a successful delete.)
+    store, _ = make_store({"whitelist": {"groups": ["Cdef"]}})
+    assert store.remove("group", "Cnope") is False
+    # and a real removal still reports True + shrinks the list
+    assert store.remove("group", "Cdef") is True
+    assert store.list()["groups"] == []
 
 
 # ---------------------------------------------------------------------------

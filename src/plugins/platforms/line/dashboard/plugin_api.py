@@ -184,9 +184,18 @@ def add_whitelist(payload: AddWhitelistBody):
 def remove_whitelist(scope: str, id: str):
     """Remove an id from the allowlist.
 
-    The store enforces the "admin entry cannot be deleted" rule and raises
-    ``WhitelistError``; we surface that as a 409 so the UI can show why the
-    delete was refused. Unknown ids are a 404.
+    DELETE is **idempotent**: whether the id was present (removed now) or
+    already absent (no-op), the desired end state — "id is not in the
+    whitelist" — holds, so we return 200. The response carries ``removed`` /
+    ``already_absent`` so the UI can tell the two apart. The store enforces the
+    "admin entry cannot be deleted" rule and raises ``WhitelistError``, which we
+    surface as a 409 so the UI can show why the delete was refused.
+
+    (Previously this returned 404 when ``store.remove`` was falsy — but the
+    store returns ``None``/``False`` for a *successful* no-present-op removal,
+    so a genuine delete was mis-reported to the UI as 404 while the config was
+    in fact written. The store now returns a proper bool and this handler treats
+    the operation as idempotent.)
     """
     if scope not in VALID_SCOPES:
         raise HTTPException(
@@ -196,19 +205,20 @@ def remove_whitelist(scope: str, id: str):
     store = _get_store()
     WhitelistError = _whitelist_error_cls()
     try:
-        ok = store.remove(scope, id)
+        removed = bool(store.remove(scope, id))
     except Exception as exc:
         if WhitelistError is not None and isinstance(exc, WhitelistError):
             # Admin-protected / policy refusal → 409 Conflict.
             raise HTTPException(status_code=409, detail=str(exc))
         log.warning("whitelist remove failed: %s", exc)
         raise HTTPException(status_code=400, detail=str(exc))
-    if not ok:
-        raise HTTPException(
-            status_code=404,
-            detail=f"{scope} {id!r} not in whitelist",
-        )
-    return {"ok": True, "scope": scope, "id": id}
+    return {
+        "ok": True,
+        "scope": scope,
+        "id": id,
+        "removed": removed,
+        "already_absent": not removed,
+    }
 
 
 # ---------------------------------------------------------------------------

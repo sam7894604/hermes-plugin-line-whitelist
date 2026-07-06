@@ -40,9 +40,12 @@ class _FakeStore:
     """
 
     _data = {"users": [], "groups": [], "rooms": []}
-    _admin = ("user", "Uadmin")
+    # store scope vocabulary (dm/group/room) — the dashboard handler translates
+    # the URL's "user" -> "dm" before calling the store, so the fake mirrors the
+    # REAL store's scope keys.
+    _admin = ("dm", "Uadmin")
 
-    _BUCKET = {"user": "users", "group": "groups", "room": "rooms"}
+    _BUCKET = {"dm": "users", "group": "groups", "room": "rooms"}
 
     # Pending queue (Phase-A contract). Class-level so every WhitelistStore()
     # the handler constructs shares the same queue within a test.
@@ -90,7 +93,7 @@ class _FakeStore:
         return len(self._pending) < before
 
     def is_admin(self, id):
-        return (self._admin[0] == "user") and id == self._admin[1]
+        return id == self._admin[1]
 
     def list(self, scope=None):
         if scope is None:
@@ -129,12 +132,9 @@ def fake_store(monkeypatch):
 
 
 def _load_plugin_router():
-    # In this standalone repo the shipped code lives under ./src, mirroring its
-    # in-Hermes path (plugins/platforms/line/dashboard/plugin_api.py).
     repo_root = Path(__file__).resolve().parents[1]
     plugin_file = (
-        repo_root / "src" / "plugins" / "platforms" / "line"
-        / "dashboard" / "plugin_api.py"
+        repo_root / "src" / "plugins" / "platforms" / "line" / "dashboard" / "plugin_api.py"
     )
     assert plugin_file.exists(), f"plugin file missing: {plugin_file}"
     spec = importlib.util.spec_from_file_location(
@@ -179,6 +179,21 @@ def test_add_and_list(client):
     r = client.get(f"{API}/whitelist")
     users = r.json()["users"]
     assert len(users) == 1 and users[0]["id"] == "U123"
+
+
+def test_add_user_scope_translates_to_dm(client):
+    # Regression: the dashboard sends scope="user" but the store's scope is
+    # "dm"; the handler used to pass "user" straight through, so store.add
+    # raised "unknown scope: 'user'" -> 400 and no user could ever be added
+    # from the dashboard. The handler now translates user->dm.
+    r = client.post(f"{API}/whitelist", json={"scope": "user", "id": "Uadd1"})
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True
+    assert "Uadd1" in [u["id"] for u in client.get(f"{API}/whitelist").json()["users"]]
+    # and remove of a user works too (user -> dm)
+    r = client.delete(f"{API}/whitelist/user/Uadd1")
+    assert r.status_code == 200 and r.json()["removed"] is True
+    assert client.get(f"{API}/whitelist").json()["users"] == []
 
 
 def test_add_invalid_scope(client):
@@ -390,13 +405,16 @@ def test_records_filters_line_sessions(client, monkeypatch):
 
     class _FakeDB:
         def list_sessions_rich(self, **kw):
+            # REAL session keys have the platform as a MIDDLE segment
+            # (agent:main:line:…), not a prefix — the regression the old
+            # startswith("line:") filter missed.
             return [
-                {"session_id": "s1", "session_key": "line:U123", "title": "LINE chat",
-                 "message_count": 3, "last_active": 100, "started_at": 90},
-                {"session_id": "s2", "session_key": "discord:42", "title": "Discord",
-                 "message_count": 5, "last_active": 200, "started_at": 190},
-                {"session_id": "s3", "session_key": "line:C55", "title": "LINE group",
-                 "message_count": 1, "last_active": 300, "started_at": 290},
+                {"session_id": "s1", "session_key": "agent:main:line:dm:U123",
+                 "title": "LINE chat", "message_count": 3, "last_active": 100, "started_at": 90},
+                {"session_id": "s2", "session_key": "agent:main:discord:channel:42",
+                 "title": "Discord", "message_count": 5, "last_active": 200, "started_at": 190},
+                {"session_id": "s3", "session_key": "agent:main:line:group:C55",
+                 "title": "LINE group", "message_count": 1, "last_active": 300, "started_at": 290},
             ]
 
         def session_count(self, **kw):
@@ -420,7 +438,7 @@ def test_records_filters_line_sessions(client, monkeypatch):
     assert r.status_code == 200, r.text
     body = r.json()
     keys = [rec["session_key"] for rec in body["records"]]
-    assert keys == ["line:U123", "line:C55"]  # discord filtered out
+    assert keys == ["agent:main:line:dm:U123", "agent:main:line:group:C55"]  # discord filtered out
     assert body["total_line_sessions"] == 2
 
 

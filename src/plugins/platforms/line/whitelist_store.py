@@ -284,8 +284,12 @@ class WhitelistStore:
         Default (``window_sec is None``): notify **once only** — subsequent
         calls return False until :meth:`clear_unauthorized`. With a window,
         re-notify once the window since ``last_notified`` has elapsed.
+
+        An ``ignored`` source is never re-notified regardless of window.
         """
         entry = self._seen_entry(source_id)
+        if entry.get("status") == "ignored":
+            return False
         last = entry.get("last_notified")
         if last is None:
             return True
@@ -337,16 +341,142 @@ class WhitelistStore:
             source_id, {"first_seen": first_seen, "last_replied": now}
         )
 
-    def record_unauthorized_attempt(self, source_id: str, meta: dict) -> None:
-        """Log a DM-stranger attempt: bumps count, stores first_seen + meta."""
+    def record_attempt(
+        self,
+        source_id: str,
+        *,
+        platform: str = "line",
+        source_type: str,
+        name: str = "",
+    ) -> None:
+        """Upsert a pending-queue entry for an unauthorized ``source_id``.
+
+        New id -> ``first_seen`` = now, ``status`` = "pending", ``count`` 0->1.
+        Every call -> ``last_seen`` = now, ``count`` += 1, refresh
+        ``platform``/``source_type``. ``name`` overwrites only when non-empty
+        (a resolved name is never blanked). ``last_notified``/``last_replied``
+        are left untouched — notify/reply throttling owns those.
+        """
         now = time.time()
         entry = self._seen_entry(source_id)
         first_seen = entry.get("first_seen", now)
+        status = entry.get("status", "pending")
         count = int(entry.get("count", 0) or 0) + 1
-        updates: Dict[str, Any] = {"first_seen": first_seen, "count": count}
-        if isinstance(meta, dict):
-            updates.update(meta)
+        updates: Dict[str, Any] = {
+            "first_seen": first_seen,
+            "last_seen": now,
+            "count": count,
+            "platform": platform,
+            "source_type": source_type,
+            "status": status,
+        }
+        if name:
+            updates["name"] = name
         self._mutate_seen(source_id, updates)
+
+    def record_unauthorized_attempt(self, source_id: str, meta: dict) -> None:
+        """Log a DM-stranger attempt (thin delegate to :meth:`record_attempt`).
+
+        Kept for existing callers with the old ``(source_id, meta)`` signature;
+        the DM ``name`` (if any) is lifted out of ``meta`` and threaded through
+        the single ``record_attempt`` code path. Extra ``meta`` keys are stored
+        on the entry so nothing is lost.
+        """
+        meta = meta if isinstance(meta, dict) else {}
+        self.record_attempt(
+            source_id, source_type="dm", name=meta.get("name", "")
+        )
+        # preserve any extra meta keys (note/text/user_id/...) on the entry,
+        # without clobbering the fields record_attempt just set.
+        extra = {
+            k: v
+            for k, v in meta.items()
+            if k not in {"name", "source_type", "platform"}
+        }
+        if extra:
+            self._mutate_seen(source_id, extra)
+
+    def list_pending(self) -> list:
+        """Pending unauthorized sources, newest first.
+
+        Excludes entries marked ``ignored`` and any id that is *currently*
+        whitelisted for its scope. Sorted by ``last_seen`` descending. Each
+        item is a flat dict with defaulted fields, never raising on gaps.
+        """
+        seen = self._seen()
+        result: list = []
+        for source_id, raw in seen.items():
+            entry = self._as_dict(raw)
+            if entry.get("status") == "ignored":
+                continue
+            source_type = entry.get("source_type", "")
+            if source_type and self.is_allowed(source_type, source_id):
+                continue
+            last_seen = entry.get("last_seen", entry.get("first_seen", 0.0))
+            result.append(
+                {
+                    "platform": entry.get("platform", "line"),
+                    "source_type": source_type,
+                    "id": source_id,
+                    "name": entry.get("name", ""),
+                    "first_seen": entry.get("first_seen", last_seen),
+                    "last_seen": last_seen,
+                    "count": int(entry.get("count", 0) or 0),
+                    "last_notified": entry.get("last_notified"),
+                    "last_replied": entry.get("last_replied"),
+                    "status": entry.get("status", "pending"),
+                }
+            )
+        result.sort(key=lambda e: e.get("last_seen") or 0.0, reverse=True)
+        return result
+
+    def approve_pending(self, source_id: str, *, added_by: str = "") -> dict:
+        """Whitelist a pending source, then drop it from the pending queue.
+
+        Resolves ``scope`` from the entry's ``source_type`` (dm/group/room,
+        already the store's scope vocabulary), calls :meth:`add` with the
+        stored ``name``, then :meth:`clear_unauthorized`. Returns
+        ``{"approved": True, "scope", "id"}`` on success, or
+        ``{"approved": False, "reason": "not found", "id"}`` if there is no
+        entry (or it lacks a usable source_type).
+        """
+        seen = self._seen()
+        if source_id not in seen:
+            return {"approved": False, "reason": "not found", "id": source_id}
+        entry = self._as_dict(seen.get(source_id))
+        scope = entry.get("source_type", "")
+        if scope not in _SCOPE_TO_LISTKEY:
+            return {"approved": False, "reason": "not found", "id": source_id}
+        self.add(
+            scope, source_id, added_by=added_by, name=entry.get("name", "")
+        )
+        # add() already clears unauthorized state, but call it explicitly per
+        # contract in case add()'s cleanup ever changes.
+        self.clear_unauthorized(source_id)
+        return {"approved": True, "scope": scope, "id": source_id}
+
+    def ignore_pending(self, source_id: str) -> bool:
+        """Mark a source ``ignored`` so it is suppressed from notify/list.
+
+        Creates a minimal entry if none exists so the decision sticks even for
+        a source not yet recorded. Always returns ``True``.
+        """
+        entry = self._seen_entry(source_id)
+        updates: Dict[str, Any] = {"status": "ignored"}
+        if "first_seen" not in entry:
+            updates["first_seen"] = time.time()
+        self._mutate_seen(source_id, updates)
+        return True
+
+    def set_name(self, source_id: str, name: str) -> None:
+        """Backfill a resolved display ``name`` onto a pending entry.
+
+        No-op for a blank name (never blanks an already-resolved name). Creates
+        the entry if absent so a late-resolved name is not lost.
+        """
+        if not name:
+            return
+        self._mutate_seen(source_id, {"name": name})
 
     def clear_unauthorized(self, source_id: str) -> None:
         seen = self._seen()

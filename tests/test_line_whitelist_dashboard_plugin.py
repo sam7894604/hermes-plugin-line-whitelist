@@ -44,9 +44,50 @@ class _FakeStore:
 
     _BUCKET = {"user": "users", "group": "groups", "room": "rooms"}
 
+    # Pending queue (Phase-A contract). Class-level so every WhitelistStore()
+    # the handler constructs shares the same queue within a test.
+    _pending = [
+        {
+            "platform": "line", "source_type": "user", "id": "Upend1",
+            "name": "Ada", "first_seen": 10, "last_seen": 20, "count": 3,
+            "last_notified": 15, "last_replied": None, "status": "pending",
+        },
+    ]
+    # Records which ids were approved/ignored so tests can assert the calls.
+    approved_calls = []
+    ignored_calls = []
+
     @classmethod
     def reset(cls):
         cls._data = {"users": [], "groups": [], "rooms": []}
+        cls._pending = [
+            {
+                "platform": "line", "source_type": "user", "id": "Upend1",
+                "name": "Ada", "first_seen": 10, "last_seen": 20, "count": 3,
+                "last_notified": 15, "last_replied": None, "status": "pending",
+            },
+        ]
+        cls.approved_calls = []
+        cls.ignored_calls = []
+
+    # --- pending queue ---------------------------------------------------
+    def list_pending(self):
+        return [dict(p) for p in self._pending]
+
+    def approve_pending(self, id, added_by=""):
+        type(self).approved_calls.append((id, added_by))
+        known = any(p["id"] == id for p in self._pending)
+        type(self)._pending = [p for p in self._pending if p["id"] != id]
+        if not known:
+            # Idempotent: unknown / already-approved id resolves cleanly.
+            return {"approved": False, "id": id, "reason": "unknown or already resolved"}
+        return {"approved": True, "scope": "user", "id": id}
+
+    def ignore_pending(self, id):
+        type(self).ignored_calls.append(id)
+        before = len(self._pending)
+        type(self)._pending = [p for p in self._pending if p["id"] != id]
+        return len(self._pending) < before
 
     def list(self, scope=None):
         if scope is None:
@@ -184,6 +225,75 @@ def test_remove_admin_is_409(client):
     # which the handler surfaces as 409.
     r = client.delete(f"{API}/whitelist/user/Uadmin")
     assert r.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# Pending queue — list / approve (idempotent) / ignore
+# ---------------------------------------------------------------------------
+
+
+def test_pending_list(client):
+    r = client.get(f"{API}/pending")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "pending" in body
+    assert len(body["pending"]) == 1
+    p = body["pending"][0]
+    assert p["id"] == "Upend1"
+    assert p["platform"] == "line"
+    assert p["source_type"] == "user"
+    assert p["count"] == 3
+
+
+def test_pending_approve_calls_store(client):
+    r = client.post(f"{API}/pending/Upend1/approve", json={"added_by": "sam"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["approved"] is True
+    assert body["id"] == "Upend1"
+    # store.approve_pending was called with the id + added_by.
+    assert _FakeStore.approved_calls == [("Upend1", "sam")]
+    # gone from the queue now.
+    assert client.get(f"{API}/pending").json()["pending"] == []
+
+
+def test_pending_approve_defaults_added_by(client):
+    # No body → added_by falls back to "dashboard".
+    r = client.post(f"{API}/pending/Upend1/approve")
+    assert r.status_code == 200, r.text
+    assert _FakeStore.approved_calls == [("Upend1", "dashboard")]
+
+
+def test_pending_approve_unknown_is_idempotent_200(client):
+    # Approving an id that isn't queued (already approved / never seen) is a
+    # clean 200 — NOT a 404. Regression guard: we just fixed a 404-on-success
+    # bug on DELETE /whitelist; don't reintroduce it on approve.
+    r = client.post(f"{API}/pending/Unknown999/approve")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["approved"] is False
+    assert _FakeStore.approved_calls == [("Unknown999", "dashboard")]
+
+
+def test_pending_ignore(client):
+    r = client.post(f"{API}/pending/Upend1/ignore")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["ignored"] is True
+    assert body["id"] == "Upend1"
+    assert _FakeStore.ignored_calls == ["Upend1"]
+    # gone from the queue.
+    assert client.get(f"{API}/pending").json()["pending"] == []
+
+
+def test_pending_ignore_unknown_is_200(client):
+    # Ignoring an id that isn't queued is still a clean 200 (idempotent).
+    r = client.post(f"{API}/pending/Unknown999/ignore")
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
 
 
 # ---------------------------------------------------------------------------

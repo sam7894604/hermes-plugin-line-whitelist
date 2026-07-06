@@ -53,6 +53,28 @@ The standalone files live under [`src/`](./src) mirroring their in-Hermes paths.
 
 ---
 
+## Pending queue & one-click approval (v0.2)
+
+Every unauthorized source (a group that @s the bot, a stranger DM, a bot
+join/follow) is recorded into a **pending queue** in the store —
+`platforms.line.unauthorized_seen[id]` enriched with `platform`, `source_type`,
+resolved `name`, `first_seen`/`last_seen`, `count`, `status`. So admins never
+hand-copy an ID:
+
+- **Dashboard "Pending" panel** — lists each pending source (name / id · type ·
+  count · last seen) with one-click **Approve** (→ whitelist) and **Ignore**
+  buttons. REST: `GET /pending`, `POST /pending/{id}/approve`, `POST
+  /pending/{id}/ignore` (idempotent 200). Ignored sources stop notifying.
+- **Interactive decision cards** (optional, `patches/telegram-discord-cards.diff`)
+  — when the unauthorized-notify target is **Telegram or Discord**, the
+  notification is an interactive **✅ Approve / ⛔ Ignore / ➖ Skip** card;
+  tapping a button (admin-gated) directly approves/ignores the source. LINE and
+  any un-patched platform get the plain-text notice instead (automatic
+  fallback). See [`docs/adapter-integration.md`](./docs/adapter-integration.md).
+- **Name resolution** — group names via `getGroupSummary`, user names via
+  `getProfile` (TTL-cached, fallback to raw id), stored on the pending entry and
+  shown in the Dashboard.
+
 ## Configuration reference (`config.yaml` → `platforms.line`)
 
 ```yaml

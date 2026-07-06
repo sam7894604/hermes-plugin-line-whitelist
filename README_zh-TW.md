@@ -53,6 +53,23 @@ LINE_ALLOW_ALL_USERS=false      # 在你的 Hermes .env / 環境變數
 
 ---
 
+## 待審佇列與一鍵核准（v0.2）
+
+每個未授權來源（@bot 的群、陌生 DM、bot 入群/被加）都會記進 store 的**待審佇列**
+——`platforms.line.unauthorized_seen[id]` 擴充 `platform`、`source_type`、解析
+`name`、`first_seen`/`last_seen`、`count`、`status`。管理員**免手抄 ID**：
+
+- **Dashboard「待審清單」面板**——列出每個待審來源（name/id · type · count ·
+  last seen）+ 一鍵 **加入白名單** / **忽略** 按鈕。REST：`GET /pending`、
+  `POST /pending/{id}/approve`、`POST /pending/{id}/ignore`（冪等 200）。忽略後
+  不再通知。
+- **互動決策卡**（選配，`patches/telegram-discord-cards.diff`）——當未授權通知的
+  target 是 **Telegram 或 Discord**，通知改為互動 **✅同意 / ⛔拒絕 / ➖略過** 卡；
+  按鈕（admin gated）直接核准/忽略該來源。LINE 及未套 patch 的平台維持純文字
+  （自動 fallback）。見 [`docs/adapter-integration.md`](./docs/adapter-integration.md)。
+- **名稱解析**——群名走 `getGroupSummary`、user 名走 `getProfile`（TTL 快取、
+  fallback raw id），存進待審條目並在 Dashboard 顯示。
+
 ## 設定參考（`config.yaml` → `platforms.line`）
 
 ```yaml

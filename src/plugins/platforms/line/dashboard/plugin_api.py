@@ -222,6 +222,93 @@ def remove_whitelist(scope: str, id: str):
 
 
 # ---------------------------------------------------------------------------
+# Pending queue — attempts awaiting an operator's approve / ignore decision
+# ---------------------------------------------------------------------------
+#
+# Mirrors the whitelist handlers: same lazy store import, same auth, same
+# WhitelistError → 4xx mapping. The Phase-A store exposes:
+#
+#     store.list_pending() -> list[dict]
+#     store.approve_pending(id, added_by="") -> dict
+#     store.ignore_pending(id) -> bool
+#
+# Approve is **idempotent**: an already-approved / unknown id is a clean 200
+# (NOT a 404) — the desired end state ("this attempt is resolved") holds either
+# way. This deliberately mirrors the DELETE /whitelist idempotency fix; don't
+# reintroduce a 404-on-success. A genuine policy refusal (WhitelistError, e.g.
+# admin-only / malformed) is a 409.
+
+
+@router.get("/pending")
+def list_pending():
+    """Return the pending-attempt queue awaiting an approve/ignore decision.
+
+    Shape: ``{"pending": [ {platform, source_type, id, name, first_seen,
+    last_seen, count, last_notified, last_replied, status}, ... ]}`` — whatever
+    the store records per attempt. The list is passed through verbatim.
+    """
+    store = _get_store()
+    try:
+        pending = store.list_pending()
+    except Exception as exc:
+        log.warning("pending list failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"pending list failed: {exc}")
+    return {"pending": list(pending or [])}
+
+
+class ApprovePendingBody(BaseModel):
+    added_by: Optional[str] = None
+
+
+@router.post("/pending/{id}/approve")
+def approve_pending(id: str, payload: Optional[ApprovePendingBody] = None):
+    """Approve a pending attempt — add it to the allowlist.
+
+    **Idempotent 200**: an already-approved or unknown id is still a clean 200
+    (the attempt is resolved either way), NOT a 404. Returns ``{"ok": True,
+    ...result}`` where ``result`` is whatever the store's ``approve_pending``
+    reports (typically ``{approved, scope?, id, reason?}``). A store-level
+    policy refusal (``WhitelistError``) maps to 409.
+    """
+    added_by = ((payload.added_by if payload else None) or "dashboard")
+    store = _get_store()
+    WhitelistError = _whitelist_error_cls()
+    try:
+        result = store.approve_pending(id, added_by=added_by)
+    except Exception as exc:
+        if WhitelistError is not None and isinstance(exc, WhitelistError):
+            raise HTTPException(status_code=409, detail=str(exc))
+        log.warning("pending approve failed: %s", exc)
+        raise HTTPException(status_code=400, detail=str(exc))
+    out = {"ok": True}
+    if isinstance(result, dict):
+        out.update(result)
+    else:
+        out["result"] = result
+    return out
+
+
+@router.post("/pending/{id}/ignore")
+def ignore_pending(id: str):
+    """Ignore a pending attempt — drop it from the queue without allowlisting.
+
+    Idempotent 200: whether the id was queued (dropped now) or already gone,
+    the desired end state holds. Returns ``{"ok": True, "ignored": True,
+    "id": id}``.
+    """
+    store = _get_store()
+    WhitelistError = _whitelist_error_cls()
+    try:
+        store.ignore_pending(id)
+    except Exception as exc:
+        if WhitelistError is not None and isinstance(exc, WhitelistError):
+            raise HTTPException(status_code=409, detail=str(exc))
+        log.warning("pending ignore failed: %s", exc)
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "ignored": True, "id": id}
+
+
+# ---------------------------------------------------------------------------
 # GET /records  — LINE communication records (reuses SessionDB)
 # ---------------------------------------------------------------------------
 

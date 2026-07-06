@@ -262,6 +262,159 @@ def test_retention_per_source_override():
 
 
 # ---------------------------------------------------------------------------
+# pending queue: record_attempt upsert
+# ---------------------------------------------------------------------------
+def _seen(backend):
+    return backend.config["platforms"]["line"].get("unauthorized_seen", {})
+
+
+def test_record_attempt_new_entry_sets_defaults():
+    store, backend = make_store({})
+    store.record_attempt("Cnew", source_type="group", name="Team")
+    entry = _seen(backend)["Cnew"]
+    assert entry["status"] == "pending"
+    assert entry["count"] == 1
+    assert entry["platform"] == "line"
+    assert entry["source_type"] == "group"
+    assert entry["name"] == "Team"
+    assert "first_seen" in entry
+    assert "last_seen" in entry
+
+
+def test_record_attempt_repeat_bumps_count_keeps_first_seen():
+    store, backend = make_store({})
+    store.record_attempt("Cx", source_type="group")
+    first = _seen(backend)["Cx"]["first_seen"]
+    time.sleep(0.01)
+    store.record_attempt("Cx", source_type="group")
+    entry = _seen(backend)["Cx"]
+    assert entry["count"] == 2
+    assert entry["first_seen"] == first  # unchanged
+    assert entry["last_seen"] >= first  # advanced
+
+
+def test_record_attempt_name_non_blank_overwrite_rule():
+    store, backend = make_store({})
+    store.record_attempt("Cx", source_type="group", name="Real Name")
+    # a subsequent blank name must NOT wipe the resolved name
+    store.record_attempt("Cx", source_type="group", name="")
+    assert _seen(backend)["Cx"]["name"] == "Real Name"
+    # a new non-blank name overwrites
+    store.record_attempt("Cx", source_type="group", name="Renamed")
+    assert _seen(backend)["Cx"]["name"] == "Renamed"
+
+
+def test_record_attempt_does_not_touch_notify_reply():
+    store, backend = make_store({})
+    store.mark_unauthorized_notified("Cx")
+    ln = _seen(backend)["Cx"].get("last_notified")
+    store.record_attempt("Cx", source_type="group")
+    assert _seen(backend)["Cx"]["last_notified"] == ln
+
+
+# ---------------------------------------------------------------------------
+# pending queue: list_pending
+# ---------------------------------------------------------------------------
+def test_list_pending_excludes_ignored_and_whitelisted_sorted():
+    store, _ = make_store({"whitelist": {"groups": ["Cwl"]}})
+    store.record_attempt("Cold", source_type="group", name="Old")
+    time.sleep(0.01)
+    store.record_attempt("Cnew", source_type="group", name="New")
+    # whitelisted id present in seen but should be filtered out
+    store.record_attempt("Cwl", source_type="group")
+    # ignored id filtered out
+    store.record_attempt("Cign", source_type="group")
+    store.ignore_pending("Cign")
+
+    pending = store.list_pending()
+    ids = [p["id"] for p in pending]
+    assert ids == ["Cnew", "Cold"]  # newest first, ignored+whitelisted excluded
+    assert pending[0]["name"] == "New"
+    assert set(pending[0].keys()) == {
+        "platform", "source_type", "id", "name", "first_seen",
+        "last_seen", "count", "last_notified", "last_replied", "status",
+    }
+
+
+# ---------------------------------------------------------------------------
+# pending queue: approve_pending
+# ---------------------------------------------------------------------------
+def test_approve_pending_adds_to_scope_and_clears():
+    store, backend = make_store({})
+    store.record_attempt("Croom1", source_type="room", name="RoomX")
+    res = store.approve_pending("Croom1", added_by="Uadmin")
+    assert res == {"approved": True, "scope": "room", "id": "Croom1"}
+    assert store.is_allowed("room", "Croom1") is True
+    # stored name carried into meta
+    assert store.list("room")["meta"]["rooms"]["Croom1"]["name"] == "RoomX"
+    # cleared from pending queue
+    assert "Croom1" not in _seen(backend)
+    assert store.list_pending() == []
+
+
+def test_approve_pending_unknown_returns_false():
+    store, _ = make_store({})
+    res = store.approve_pending("Cnope")
+    assert res == {"approved": False, "reason": "not found", "id": "Cnope"}
+
+
+def test_approve_pending_dm_maps_to_users():
+    store, _ = make_store({})
+    store.record_attempt("Uxyz", source_type="dm")
+    res = store.approve_pending("Uxyz", added_by="Uadmin")
+    assert res["approved"] is True and res["scope"] == "dm"
+    assert "Uxyz" in store.list()["users"]
+
+
+# ---------------------------------------------------------------------------
+# pending queue: ignore_pending
+# ---------------------------------------------------------------------------
+def test_ignore_pending_suppresses_notify_and_list():
+    store, backend = make_store({})
+    store.record_attempt("Cspam", source_type="group")
+    assert store.should_notify_unauthorized("Cspam") is True
+    assert store.ignore_pending("Cspam") is True
+    assert _seen(backend)["Cspam"]["status"] == "ignored"
+    assert store.should_notify_unauthorized("Cspam") is False
+    assert [p["id"] for p in store.list_pending()] == []
+
+
+def test_ignore_pending_creates_minimal_entry_when_absent():
+    store, backend = make_store({})
+    assert store.ignore_pending("Cghost") is True
+    assert _seen(backend)["Cghost"]["status"] == "ignored"
+    assert store.should_notify_unauthorized("Cghost") is False
+
+
+# ---------------------------------------------------------------------------
+# pending queue: set_name backfill
+# ---------------------------------------------------------------------------
+def test_set_name_backfills_existing_entry():
+    store, backend = make_store({})
+    store.record_attempt("Cx", source_type="group")
+    store.set_name("Cx", "Resolved Name")
+    assert _seen(backend)["Cx"]["name"] == "Resolved Name"
+
+
+def test_set_name_blank_is_noop():
+    store, backend = make_store({})
+    store.record_attempt("Cx", source_type="group", name="Keep")
+    store.set_name("Cx", "")
+    assert _seen(backend)["Cx"]["name"] == "Keep"
+
+
+def test_record_unauthorized_attempt_delegates_and_preserves_meta():
+    store, backend = make_store({})
+    store.record_unauthorized_attempt("Uspam", {"note": "dm stranger", "name": "Bob"})
+    entry = _seen(backend)["Uspam"]
+    assert entry["source_type"] == "dm"  # forced by delegate
+    assert entry["name"] == "Bob"
+    assert entry["note"] == "dm stranger"  # extra meta preserved
+    assert entry["count"] == 1
+    assert entry["status"] == "pending"
+
+
+# ---------------------------------------------------------------------------
 # notify helper
 # ---------------------------------------------------------------------------
 class FakeHomeChannel:

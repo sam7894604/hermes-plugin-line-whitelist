@@ -118,22 +118,46 @@ async def notify_unauthorized(
         )
 
         # Lazy import to avoid pulling the heavy send stack at module load.
-        from tools.send_message_tool import _send_to_platform
         from gateway.config import Platform
 
-        # Route to the target's platform (``telegram:...`` sends via Telegram,
-        # a bare id falls back to the LINE home channel).
+        # Route to the target's platform (``telegram:...`` -> Telegram, a bare
+        # id -> the LINE home channel).
         plat_name, chat_id = _parse_target(target)
         platform = Platform(plat_name)
+
+        # Interactive decision card for Telegram/Discord — needs the LIVE
+        # in-process adapter (so button taps route back to it). Plain text
+        # everywhere else, and as a fallback on any failure.
+        if plat_name in ("telegram", "discord"):
+            try:
+                from gateway.run import _gateway_runner_ref
+
+                runner = _gateway_runner_ref()
+                adapter = runner.adapters.get(platform) if runner is not None else None
+                if adapter is not None and getattr(
+                    type(adapter), "send_whitelist_decision", None
+                ) is not None:
+                    res = await adapter.send_whitelist_decision(
+                        chat_id=chat_id,
+                        source_type=source_type,
+                        source_id=source_id,
+                        name=display or source_id,
+                    )
+                    if getattr(res, "success", False):
+                        store.mark_unauthorized_notified(source_id)
+                        return True
+                    # card send failed -> fall through to plain text
+            except Exception:
+                logger.debug(
+                    "notify_unauthorized: card send failed, falling back to text",
+                    exc_info=True,
+                )
+
+        # Plain-text path (LINE always; telegram/discord if no live adapter/card).
+        from tools.send_message_tool import _send_to_platform
+
         pconfig = _resolve_pconfig(config, platform)
-
-        await _send_to_platform(
-            platform,
-            pconfig,
-            chat_id,
-            message,
-        )
-
+        await _send_to_platform(platform, pconfig, chat_id, message)
         store.mark_unauthorized_notified(source_id)
         return True
     except Exception:

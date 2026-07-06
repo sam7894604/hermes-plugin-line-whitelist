@@ -10,12 +10,21 @@ adapter's inbound path. That cannot be a separate file: it edits
 
 So that part is shipped honestly as a **patch**, not a plugin file:
 
-- `patches/line-adapter.diff` — the adapter changes (against the upstream/fork
-  LINE adapter). Reference: **fork PR #6** on `sam7894604/hermes-agent`
-  (`feat/line-whitelist-management`).
-- `patches/hermes-core-wiring.diff` — three tiny additive edits to shared Hermes
+- `patches/line-adapter.diff` — the LINE adapter changes (gate / @mention /
+  reject / observed / media / quote / name resolution **+ pending-queue
+  `record_attempt` recording**). Reference: **fork PR #6 + #7** on
+  `sam7894604/hermes-agent`.
+- `patches/hermes-core-wiring.diff` — tiny additive edits to shared Hermes
   files that register the `line_whitelist` toolset and let the Dashboard plugin
   be discovered (see below).
+- `patches/telegram-discord-cards.diff` — **optional** additive edits to the
+  Telegram + Discord adapters that add interactive ✅Approve/⛔Ignore/➖Skip
+  **decision cards** for the unauthorized-source notification (button taps call
+  `approve_pending`/`ignore_pending`). Without this patch the notification
+  degrades cleanly to plain text (the `whitelist_notify` bridge falls back when
+  no `send_whitelist_decision` method is present). Reference: **fork PR #7**.
+  ⚠️ These edit the live Telegram/Discord adapters — apply additively and
+  restart the gateway. The standalone LINE-plugin files never need them.
 
 ## What the adapter patch does
 

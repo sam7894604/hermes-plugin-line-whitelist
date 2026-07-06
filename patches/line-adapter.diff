@@ -1,5 +1,5 @@
 diff --git a/plugins/platforms/line/adapter.py b/plugins/platforms/line/adapter.py
-index 447cf5fb0..881d57395 100644
+index 447cf5fb0..2eb945022 100644
 --- a/plugins/platforms/line/adapter.py
 +++ b/plugins/platforms/line/adapter.py
 @@ -96,6 +96,15 @@ from gateway.platforms.base import (
@@ -291,7 +291,7 @@ index 447cf5fb0..881d57395 100644
          )
  
          event_obj = MessageEvent(
-@@ -993,6 +1172,269 @@ class LineAdapter(BasePlatformAdapter):
+@@ -993,6 +1172,287 @@ class LineAdapter(BasePlatformAdapter):
  
          await self.handle_message(event_obj)
  
@@ -372,30 +372,48 @@ index 447cf5fb0..881d57395 100644
 +        except Exception:
 +            logger.debug("LINE: notify_unauthorized failed", exc_info=True)
 +
++    async def _source_display_name(self, chat_id: str, chat_type: str, user_id: str) -> str:
++        """Best-effort display name for a SOURCE (pending-queue attribution).
++
++        A group/room source resolves to the group name (getGroupSummary); a DM
++        source resolves to the sender's profile name. Falls back to '' so the
++        caller can substitute the raw id.
++        """
++        if chat_type == "dm":
++            return await self._resolve_name(chat_id, chat_type, user_id) or ""
++        return await self._resolve_chat_name(chat_id, chat_type) or ""
++
++    def _record_pending(self, source_id: str, source_type: str, name: str) -> None:
++        """Log an unauthorized attempt into the pending queue (best-effort)."""
++        if self._whitelist is None:
++            return
++        try:
++            self._whitelist.record_attempt(
++                source_id, platform="line", source_type=source_type, name=name,
++            )
++        except Exception:
++            logger.debug("LINE: record_attempt failed", exc_info=True)
++
 +    async def _maybe_notify_new_source(self, source: Dict[str, Any]) -> None:
 +        sid, stype = _resolve_chat(source)
 +        if not sid:
 +            return
-+        display = await self._resolve_chat_name(sid, stype) or sid
-+        await self._notify_admin_unauthorized(stype, sid, display=display)
++        name = await self._resolve_chat_name(sid, stype) or ""
++        self._record_pending(sid, stype, name)
++        await self._notify_admin_unauthorized(stype, sid, display=name or sid)
 +
 +    async def _reject_unauthorized(
 +        self, *, chat_id: str, chat_type: str, user_id: str,
 +        reply_token: str, attempt_text: str, dm: bool,
 +    ) -> None:
-+        """Unauthorized-source handling: notify admins (dedup), record the DM
-+        attempt, and send a throttled English reply."""
-+        display = await self._resolve_name(chat_id, chat_type, user_id) or user_id
-+        await self._notify_admin_unauthorized(chat_type, chat_id, display=display)
-+
-+        if dm and self._whitelist is not None:
-+            try:
-+                self._whitelist.record_unauthorized_attempt(
-+                    chat_id,
-+                    {"user_id": user_id, "text": attempt_text, "ts": time.time()},
-+                )
-+            except Exception:
-+                logger.debug("LINE: record_unauthorized_attempt failed", exc_info=True)
++        """Unauthorized-source handling: record the attempt into the pending
++        queue (with resolved name), notify admins (dedup), send a throttled
++        English reply."""
++        name = await self._source_display_name(chat_id, chat_type, user_id)
++        self._record_pending(chat_id, chat_type, name)
++        await self._notify_admin_unauthorized(
++            chat_type, chat_id, display=name or (user_id if dm else chat_id)
++        )
 +
 +        if self._whitelist is not None:
 +            try:
